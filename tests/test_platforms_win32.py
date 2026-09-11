@@ -301,15 +301,15 @@ class TestTaskbarUsesLightTheme(unittest.TestCase):
 
 
 class _DefaultConfigDirTestCase(unittest.TestCase):
-    """Base class pinning the default config dir (no per-instance suffix)."""
+    """Base class pinning the default config dir (no suffix, no --config-dir)."""
 
     def setUp(self):
-        patcher_suffix = patch.object(win32, 'config_dir_suffix', return_value='')
-        patcher_default = patch.object(win32, 'is_default_config_dir', return_value=True)
+        patcher_suffix = patch.object(win32, 'autostart_suffix', return_value='')
+        patcher_argument = patch.object(win32, 'autostart_config_dir_argument', return_value=None)
         patcher_suffix.start()
-        patcher_default.start()
+        patcher_argument.start()
         self.addCleanup(patcher_suffix.stop)
-        self.addCleanup(patcher_default.stop)
+        self.addCleanup(patcher_argument.stop)
 
 
 class TestIsAutostartEnabled(_DefaultConfigDirTestCase):
@@ -469,15 +469,26 @@ class TestCustomConfigDirAutostart(unittest.TestCase):
     """Per-instance registry naming and command for a non-default config dir."""
 
     def setUp(self):
-        patcher_suffix = patch.object(win32, 'config_dir_suffix', return_value='_abc123def456')
-        patcher_default = patch.object(win32, 'is_default_config_dir', return_value=False)
-        patcher_env = patch.dict('os.environ', {'CLAUDE_CONFIG_DIR': r'C:\Users\test\.claude-second'})
+        patcher_suffix = patch.object(win32, 'autostart_suffix', return_value='_abc123def456')
+        patcher_argument = patch.object(win32, 'autostart_config_dir_argument', return_value=r'C:\Users\test\.claude-second')
         patcher_suffix.start()
-        patcher_default.start()
-        patcher_env.start()
+        patcher_argument.start()
         self.addCleanup(patcher_suffix.stop)
-        self.addCleanup(patcher_default.stop)
-        self.addCleanup(patcher_env.stop)
+        self.addCleanup(patcher_argument.stop)
+
+    @patch.object(win32, 'winreg')
+    def test_enable_command_carries_whole_launch_set(self, mock_winreg):
+        """A multi-account launch stores every directory, so login starts every instance."""
+        mock_key = MagicMock()
+        mock_winreg.OpenKey.return_value.__enter__ = MagicMock(return_value=mock_key)
+        mock_winreg.OpenKey.return_value.__exit__ = MagicMock(return_value=False)
+        launch_set = r'C:\Users\test\.claude-work;C:\Users\test\.claude-home'
+
+        with patch.object(win32, 'autostart_config_dir_argument', return_value=launch_set):
+            win32.set_autostart(True)
+
+        command = mock_winreg.SetValueEx.call_args[0][4]
+        self.assertEqual(command, f'"{sys.executable}" --config-dir="{launch_set}"')
 
     @patch.object(win32, 'winreg')
     def test_enable_uses_suffixed_value_name(self, mock_winreg):

@@ -22,7 +22,7 @@ from typing import Any, Callable, TextIO
 
 from PIL import ImageFont
 
-from ..instance_id import config_dir_suffix, effective_config_dir, is_default_config_dir
+from ..instance_id import autostart_config_dir_argument, autostart_suffix
 
 __all__ = [
     'AUTOSTART_REG_BASE_NAME', 'AUTOSTART_REG_KEY', 'DIAGNOSTIC_PACKAGES', 'ask_yes_no',
@@ -246,15 +246,16 @@ def watch_theme_change(callback: Callable[[], None]) -> None:
 
 
 def _autostart_reg_name() -> str:
-    """Return the per-instance registry value name."""
-    return AUTOSTART_REG_BASE_NAME + config_dir_suffix()
+    """Return the registry value name for this launch (one account or a set)."""
+    return AUTOSTART_REG_BASE_NAME + autostart_suffix()
 
 
 def _autostart_command() -> str:
-    """Return the command line to store in the registry for this instance."""
+    """Return the command line to store in the registry for this launch."""
     command = f'"{sys.executable}"'
-    if not is_default_config_dir():
-        command += f' --config-dir="{effective_config_dir()}"'
+    config_dir_argument = autostart_config_dir_argument()
+    if config_dir_argument is not None:
+        command += f' --config-dir="{config_dir_argument}"'
 
     return command
 

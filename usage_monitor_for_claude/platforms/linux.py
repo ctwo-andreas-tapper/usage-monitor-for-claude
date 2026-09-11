@@ -25,7 +25,7 @@ from typing import Any, Callable
 
 from PIL import ImageFont
 
-from ..instance_id import config_dir_suffix, effective_config_dir, is_default_config_dir
+from ..instance_id import autostart_config_dir_argument, autostart_suffix
 
 __all__ = [
     'AUTOSTART_DIRECTORY', 'DIAGNOSTIC_PACKAGES', 'ask_yes_no', 'diagnostic_display_rows',
@@ -385,12 +385,12 @@ def _read_color_scheme() -> int | None:
 
 
 def _autostart_file() -> Path:
-    """Return the per-instance .desktop path."""
-    return AUTOSTART_DIRECTORY / f'{AUTOSTART_BASE_NAME}{config_dir_suffix()}.desktop'
+    """Return the .desktop path for this launch (one account or a set)."""
+    return AUTOSTART_DIRECTORY / f'{AUTOSTART_BASE_NAME}{autostart_suffix()}.desktop'
 
 
 def _autostart_command() -> str:
-    """Return the Exec line for this instance.
+    """Return the Exec line for this launch.
 
     A frozen build is its own executable; running from source needs the
     interpreter plus the module, or the entry would not start.
@@ -400,8 +400,9 @@ def _autostart_command() -> str:
     else:
         command = f'{shlex.quote(sys.executable)} -m usage_monitor_for_claude'
 
-    if not is_default_config_dir():
-        command += f' --config-dir={shlex.quote(str(effective_config_dir()))}'
+    config_dir_argument = autostart_config_dir_argument()
+    if config_dir_argument is not None:
+        command += f' --config-dir={shlex.quote(config_dir_argument)}'
 
     return command
 

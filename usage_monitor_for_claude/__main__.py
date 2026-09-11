@@ -3,43 +3,50 @@ from __future__ import annotations
 
 import logging
 import os
-import subprocess
 import sys
 import traceback
 from pathlib import Path
 
-from usage_monitor_for_claude.instance_id import parse_config_dir
-from usage_monitor_for_claude.platforms import (
-    no_window_kwargs, prepare_gui_environment, set_dpi_awareness, show_error_box,
-)
+from usage_monitor_for_claude.instance_id import parse_config_dirs, split_config_dir_list
+from usage_monitor_for_claude.platforms import prepare_gui_environment, set_dpi_awareness, show_error_box
 
 _verbose = '--verbose' in sys.argv
-
-# --config-dir selects which Claude account to monitor. It must be
-# resolved into CLAUDE_CONFIG_DIR before any package import that reads the
-# variable: api, settings, verbose and i18n all read it at import or
-# first-use time. Keep every other package import below this block.
-#
-# instance_id and platforms are the only exceptions, imported above because
-# this block needs them. Neither reads CLAUDE_CONFIG_DIR at import time, and
-# platforms cannot start doing so - settings imports platforms, so the
-# reverse would be a cycle.
-_config_dir = parse_config_dir(sys.argv)
-if _config_dir is not None:
-    _config_path = Path(_config_dir)
-    if not _config_path.is_dir():
-        show_error_box(
-            f'--config-dir directory does not exist:\n{_config_dir}',
-            'Usage Monitor for Claude - Error',
-        )
-        sys.exit(1)
-    os.environ['CLAUDE_CONFIG_DIR'] = str(_config_path.resolve())
 
 # In frozen builds (console=False), stdout/stderr go nowhere.
 # --verbose attaches a console so diagnostics are visible.
 if _verbose and getattr(sys, 'frozen', False):
     from usage_monitor_for_claude.verbose import setup_console
     setup_console()
+
+# --config-dir selects which Claude account(s) to monitor; without it the
+# CLAUDE_CONFIG_DIR variable does. Several directories start one instance
+# each, and this process ends. A single directory must be resolved into
+# CLAUDE_CONFIG_DIR before any package import that reads the variable: api,
+# settings, verbose and i18n all read it at import or first-use time. Keep
+# every other package import below this block.
+#
+# instance_id, launch and platforms are the only exceptions, imported here
+# because this block needs them. None of them reads CLAUDE_CONFIG_DIR at
+# import time, and platforms cannot start doing so - settings imports
+# platforms, so the reverse would be a cycle.
+_config_dirs = parse_config_dirs(sys.argv) or split_config_dir_list(os.environ.get('CLAUDE_CONFIG_DIR', ''))
+_missing_config_dirs = [config_dir for config_dir in _config_dirs if not Path(config_dir).is_dir()]
+if _missing_config_dirs:
+    show_error_box(
+        'Claude config directory does not exist:\n' + '\n'.join(_missing_config_dirs),
+        'Usage Monitor for Claude - Error',
+    )
+    sys.exit(1)
+
+if len(_config_dirs) > 1:
+    from usage_monitor_for_claude.launch import launch_account_instances
+    for _started_config_dir in launch_account_instances(_config_dirs, verbose=_verbose):
+        if _verbose:
+            print(f'  [startup] started instance for {_started_config_dir}', flush=True)
+    sys.exit(0)
+
+if _config_dirs:
+    os.environ['CLAUDE_CONFIG_DIR'] = str(Path(_config_dirs[0]).resolve())
 
 # Both must be settled before pywebview creates any window: DPI awareness
 # cannot be changed once a window exists, and the GUI toolkit reads its
@@ -54,6 +61,7 @@ if _verbose:
 import webview  # type: ignore[import-untyped]  # no type stubs available
 
 from usage_monitor_for_claude.app import UsageMonitorForClaude, crash_log
+from usage_monitor_for_claude.launch import spawn_app_instance
 from usage_monitor_for_claude.platforms import register_notification_identity
 from usage_monitor_for_claude.platforms.instance import ensure_single_instance, release_instance_lock
 
@@ -128,20 +136,11 @@ try:
         release_instance_lock()
 
         passthrough_args = []
-        if _config_dir is not None:
+        if _config_dirs:
             passthrough_args.append(f'--config-dir={os.environ["CLAUDE_CONFIG_DIR"]}')
         if _verbose:
             passthrough_args.append('--verbose')
 
-        if getattr(sys, 'frozen', False):
-            # Clear PyInstaller's internal env vars so the new
-            # instance extracts to a fresh temp directory instead
-            # of reusing the current (soon-to-be-deleted) one.
-            env = {k: v for k, v in os.environ.items() if not k.startswith(('_PYI_', '_MEI'))}
-            subprocess.Popen([sys.executable, *passthrough_args], env=env, **no_window_kwargs())
-        else:
-            subprocess.Popen(
-                [sys.executable, '-m', 'usage_monitor_for_claude', *passthrough_args], **no_window_kwargs(),
-            )
+        spawn_app_instance(passthrough_args)
 except Exception:
     crash_log(traceback.format_exc())

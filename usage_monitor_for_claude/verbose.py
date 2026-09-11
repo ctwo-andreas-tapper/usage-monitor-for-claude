@@ -16,6 +16,7 @@ import os
 import sys
 from pathlib import Path
 
+from .instance_id import CONFIG_DIR_SEPARATOR, LAUNCH_CONFIG_DIRS_ENV
 from .platforms import (
     DIAGNOSTIC_PACKAGES, diagnostic_display_rows, diagnostic_post_init_rows,
     diagnostic_runtime_rows, diagnostic_system_rows, setup_console,
@@ -100,6 +101,9 @@ def print_startup_diagnostics() -> None:
     _row('Filesystem encoding', sys.getfilesystemencoding())
     _row('Default encoding', sys.getdefaultencoding())
     _row('CLAUDE_CONFIG_DIR', _redact_home(os.environ.get('CLAUDE_CONFIG_DIR', '')) or '(not set)')
+    launch_set = os.environ.get(LAUNCH_CONFIG_DIRS_ENV, '')
+    if launch_set:
+        _row('Account set', CONFIG_DIR_SEPARATOR.join(_redact_home(entry) for entry in launch_set.split(CONFIG_DIR_SEPARATOR)))
 
     _section('Display')
     for label, value in diagnostic_display_rows():

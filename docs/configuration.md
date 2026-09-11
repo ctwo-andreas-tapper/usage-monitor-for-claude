@@ -12,7 +12,7 @@ All settings work out of the box - no configuration file is needed. To customize
 
 The app searches for this file in these locations (first match wins):
 
-1. **`$CLAUDE_CONFIG_DIR/usage-monitor-settings.json`** (only if a custom config directory is set via `--config-dir` or `CLAUDE_CONFIG_DIR` and differs from `~/.claude/`) - so each instance can have its own settings
+1. **`$CLAUDE_CONFIG_DIR/usage-monitor-settings.json`** (only if a custom config directory is set via `--config-dir` or `CLAUDE_CONFIG_DIR` and differs from `~/.claude/`) - so each instance can have its own settings. When several directories are passed in one launch, each instance reads the file in its own directory
 2. **Next to the EXE** (or project root when running from source)
 3. **`~/.claude/usage-monitor-settings.json`**
 

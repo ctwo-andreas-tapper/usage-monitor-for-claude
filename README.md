@@ -28,7 +28,7 @@ A native tray app for Windows and Linux that shows your Claude usage at a glance
 - **Time marker** on every bar, in the popup and on the tray icon alike, showing how much of the current period has elapsed - so you see at a glance whether your usage is ahead of or behind the clock. Bars that outpace it turn red
 - **Automatic token refresh** - when the OAuth session expires, runs `claude update` in the background to renew the token without user intervention. If a CLI update is installed, shows a notification (which you can turn off via the `notify_claude_update` setting)
 - **Adaptive polling** - speeds up during active usage, slows down to a 15-minute cadence when the computer is idle or locked, aligns to imminent quota resets, and backs off on rate-limit errors. An open detail popup always stays up to date. Quota resets and account switches are picked up as they happen, even on an unattended machine, so the tray never lingers on stale numbers or on the previous account's usage
-- **Multi-account** - monitor several Claude accounts side by side: launch one instance per account with `--config-dir="<path>"` pointing at each account's Claude config directory. Each tray icon shows its account's usage, with a `[dir-name]` tooltip prefix, per-instance settings, and its own autostart entry
+- **Multi-account** - monitor several Claude accounts side by side from one command: pass every account's Claude config directory to `--config-dir`, separated by `;` on Windows (`:` on Linux) or by repeating the flag, or set `CLAUDE_CONFIG_DIR` to the same list. The app starts one tray icon per account, each with a `[dir-name]` tooltip prefix and its own settings, and a single **Start at login** entry brings the whole set back
 - **13 languages** (English, German, French, Spanish, Portuguese, Italian, Japanese, Korean, Hindi, Indonesian, Chinese Simplified, Chinese Traditional, Ukrainian) - auto-detected from your system's display language, with optional manual override via the `language` setting
 - **[Customizable](docs/configuration.md)** - optionally override polling intervals, colors, alert thresholds, and more via a JSON settings file
 
@@ -78,7 +78,7 @@ Chrome does not add a second opinion. It passes every downloaded executable to t
 
 - **Windows 10 or Windows 11** (64-bit), or **Linux** with a freedesktop desktop environment (see [Linux](#linux) below)
 - **A Claude subscription** (Pro, Max, Team, or Enterprise) - the app displays the session and weekly rate limits that come with your plan. Pay-as-you-go API billing through the Anthropic Console has no such limits and is not supported.
-- **[Claude Code](https://docs.anthropic.com/en/docs/claude-code)** installed and logged in (CLI, VS Code extension, or JetBrains plugin - any variant works). The app reads the OAuth token that Claude Code stores locally (`~/.claude/.credentials.json`), or from `CLAUDE_CONFIG_DIR` when that is set; the `--config-dir="<path>"` command-line parameter overrides both. To run one instance per Claude account, log each account in via Claude Code with `CLAUDE_CONFIG_DIR` pointing at its own directory first.
+- **[Claude Code](https://docs.anthropic.com/en/docs/claude-code)** installed and logged in (CLI, VS Code extension, or JetBrains plugin - any variant works). The app reads the OAuth token that Claude Code stores locally (`~/.claude/.credentials.json`), or from `CLAUDE_CONFIG_DIR` when that is set; the `--config-dir="<path>"` command-line parameter overrides both. To monitor several Claude accounts, log each account in via Claude Code with `CLAUDE_CONFIG_DIR` pointing at its own directory first, then pass all of those directories in one `--config-dir` value, e.g. `--config-dir="C:\claude-work;C:\claude-home"` (use `:` as the separator on Linux). One instance starts per directory.
 
 > [!TIP]
 > If the token expires, the app automatically runs `claude update` to refresh it. If the token is missing entirely, the app shows a notification and a "!" icon - run `claude auth login` and the monitor picks the new token up automatically.
@@ -184,6 +184,48 @@ Each bar in the detail popup has up to four visual elements:
 3. **White vertical line** - how much *time* has passed in the current period. The fill turns **red** when it passes this marker, warning that you may hit the limit before the period resets.
 4. **Reset text** - when the limit resets, shown as a countdown with clock time
 
+### Monitoring multiple accounts
+
+Claude Code keeps one login per config directory (`~/.claude` by default, or whatever `CLAUDE_CONFIG_DIR` points at). Give each account its own directory, log each one in, then start the monitor with all of those directories at once. One tray icon appears per account, each with the directory name in its tooltip, e.g. `[claude-home]`.
+
+**1. Log each account in to its own directory.** Run this once per account, in a terminal, with a different directory each time:
+
+```powershell
+# Windows (PowerShell)
+$env:CLAUDE_CONFIG_DIR = "C:\Users\you\claude-work"
+claude auth login
+
+$env:CLAUDE_CONFIG_DIR = "C:\Users\you\claude-home"
+claude auth login
+```
+
+```bash
+# Linux
+CLAUDE_CONFIG_DIR=~/claude-work claude auth login
+CLAUDE_CONFIG_DIR=~/claude-home claude auth login
+```
+
+Your existing login in `~/.claude` can stay as it is and be one of the monitored accounts.
+
+**2. Start the monitor with every directory.** Separate the paths with `;` on Windows or `:` on Linux, or repeat the flag once per directory:
+
+```powershell
+# Windows
+UsageMonitorForClaude.exe --config-dir="C:\Users\you\claude-work;C:\Users\you\claude-home"
+UsageMonitorForClaude.exe --config-dir="C:\Users\you\claude-work" --config-dir="C:\Users\you\claude-home"
+```
+
+```bash
+# Linux
+./usage-monitor-for-claude --config-dir="$HOME/claude-work:$HOME/claude-home"
+```
+
+Setting `CLAUDE_CONFIG_DIR` to the same list and starting the app without a flag works too. If a directory does not exist, the app shows which one and starts nothing. Running the command a second time is harmless: an account that is already monitored is skipped.
+
+**3. Start at login.** Right-click any of the tray icons and enable **Start at login**. The entry stores the whole list, so all accounts come back after the next login. Disabling it from any icon removes the entry for all of them.
+
+To quit or restart one account, use that icon's menu; the others keep running. Each account reads its own [`usage-monitor-settings.json`](#configuration) from its config directory, so alert thresholds or colors can differ per account.
+
 ---
 
 ## Configuration
@@ -200,7 +242,7 @@ All settings work out of the box - no configuration file is needed. To customize
 
 The app searches for this file in these locations (first match wins):
 
-1. **`$CLAUDE_CONFIG_DIR/usage-monitor-settings.json`** (when a custom config directory is set via `--config-dir` or `CLAUDE_CONFIG_DIR`) - so each instance can have its own settings
+1. **`$CLAUDE_CONFIG_DIR/usage-monitor-settings.json`** (when a custom config directory is set via `--config-dir` or `CLAUDE_CONFIG_DIR`) - so each instance can have its own settings, also when several accounts were started from one command
 2. **Next to the EXE** (or project root when running from source)
 3. **`~/.claude/usage-monitor-settings.json`**
 

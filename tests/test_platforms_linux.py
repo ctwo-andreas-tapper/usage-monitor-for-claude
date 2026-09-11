@@ -330,13 +330,13 @@ class TestAutostart(unittest.TestCase):
         self.addCleanup(patcher.stop)
         self.addCleanup(self._tmp.cleanup)
 
-        suffix = patch.object(linux, 'config_dir_suffix', return_value='')
+        suffix = patch.object(linux, 'autostart_suffix', return_value='')
         suffix.start()
         self.addCleanup(suffix.stop)
 
-        default = patch.object(linux, 'is_default_config_dir', return_value=True)
-        default.start()
-        self.addCleanup(default.stop)
+        argument = patch.object(linux, 'autostart_config_dir_argument', return_value=None)
+        argument.start()
+        self.addCleanup(argument.stop)
 
     def test_disabled_by_default(self):
         """No entry means autostart is off."""
@@ -364,18 +364,25 @@ class TestAutostart(unittest.TestCase):
 
     def test_config_dir_gets_own_entry(self):
         """A second monitored account writes a separate entry."""
-        with patch.object(linux, 'config_dir_suffix', return_value='-abc123'):
+        with patch.object(linux, 'autostart_suffix', return_value='-abc123'):
             linux.set_autostart(True)
             self.assertTrue((self.directory / 'usage-monitor-for-claude-abc123.desktop').is_file())
         self.assertFalse(linux.is_autostart_enabled())
 
     def test_non_default_config_dir_in_exec(self):
         """A custom config directory is passed through on the Exec line."""
-        with patch.object(linux, 'is_default_config_dir', return_value=False), \
-             patch.object(linux, 'effective_config_dir', return_value=Path('/home/u/.claude-second')):
+        with patch.object(linux, 'autostart_config_dir_argument', return_value='/home/u/.claude-second'):
             linux.set_autostart(True)
         content = (self.directory / 'usage-monitor-for-claude.desktop').read_text(encoding='utf-8')
         self.assertIn('--config-dir=/home/u/.claude-second', content)
+
+    def test_launch_set_in_exec_stays_one_argument(self):
+        """Every directory of a multi-account launch is stored, quoted as a single value."""
+        launch_set = '/home/u/.claude-work:/home/u/my accounts/.claude-home'
+        with patch.object(linux, 'autostart_config_dir_argument', return_value=launch_set):
+            linux.set_autostart(True)
+        content = (self.directory / 'usage-monitor-for-claude.desktop').read_text(encoding='utf-8')
+        self.assertIn(f"--config-dir='{launch_set}'", content)
 
     def test_exec_quotes_paths_with_spaces(self):
         """A path containing spaces stays one argument."""

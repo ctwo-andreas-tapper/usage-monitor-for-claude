@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Several Claude accounts can now be monitored from a single command: pass all of their config directories to `--config-dir` (separated by `;` on Windows, `:` on Linux, or by repeating the flag) or set `CLAUDE_CONFIG_DIR` to that list, and one tray icon starts per account. **Start at login** on any of those icons brings the whole set back, so you no longer need one shortcut and one autostart entry per account
 - The Extra Usage section in the detail popup now also shows the prepaid usage credits you have left to pay for it, so you can tell whether work can continue instead of only seeing what has been spent (thanks to [@TheConfax](https://github.com/TheConfax) for the contribution)
 
 ### Changed
