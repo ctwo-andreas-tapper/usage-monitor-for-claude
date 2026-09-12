@@ -16,7 +16,7 @@ from .settings import CURRENCY_SYMBOL, TIME_FORMAT, TOOLTIP_FIELDS, _SYSTEM_CURR
 
 __all__ = [
     'divider_positions', 'elapsed_pct', 'expand_popup_fields', 'field_period', 'format_credits',
-    'format_tooltip', 'parse_field_name', 'popup_label', 'time_until', 'tooltip_label',
+    'format_tooltip', 'is_active_quota', 'parse_field_name', 'popup_label', 'time_until', 'tooltip_label',
 ]
 
 PERIOD_5H = 5 * 3600
@@ -143,6 +143,27 @@ def field_period(field: str) -> int | None:
     return None
 
 
+def is_active_quota(field: str, entry: Any) -> bool:
+    """Return True if a usage entry is a quota that applies to the account.
+
+    The API lists quota types before they apply, under code names (e.g.
+    ``nimbus_quill``), with a utilization of 0 and no reset window.  An entry
+    therefore counts only if it has a reset window, a name that parses, or
+    the ``from_account_limits`` marker set by ``_merge_scoped_limits()``.
+
+    Parameters
+    ----------
+    field : str
+        API field name.
+    entry : Any
+        Value of that field in the usage response.
+    """
+    if not isinstance(entry, dict) or entry.get('utilization') is None:
+        return False
+
+    return bool(entry.get('resets_at')) or parse_field_name(field) is not None or bool(entry.get('from_account_limits'))
+
+
 def _field_sort_key(field: str) -> tuple[int, int, int, str]:
     """Sort key for default field ordering: shorter periods first, base before variants."""
     parsed = parse_field_name(field)
@@ -168,12 +189,12 @@ def expand_popup_fields(popup_fields: list[str], usage_data: dict[str, Any]) -> 
     Returns
     -------
     list[str]
-        Ordered list of field names to display, with null/missing fields removed.
+        Ordered list of field names to display, with null, missing and
+        not-yet-active fields removed.
     """
     available = {
         key for key, value in usage_data.items()
-        if isinstance(value, dict) and 'utilization' in value and 'resets_at' in value
-        and value.get('utilization') is not None
+        if isinstance(value, dict) and 'resets_at' in value and is_active_quota(key, value)
     }
 
     result: list[str] = []
