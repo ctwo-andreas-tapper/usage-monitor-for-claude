@@ -249,7 +249,7 @@ Fires once after the first successful API update following app start (also after
 | `USAGE_MONITOR_EXTRA_USED` | `$8.20` | Amount spent (only set when extra usage is enabled) |
 | `USAGE_MONITOR_EXTRA_LIMIT` | `$10.00` | Monthly limit (only set when extra usage is enabled) |
 
-Per-quota variables are emitted for every quota field the API returns - additional variants like `USAGE_MONITOR_UTILIZATION_SEVEN_DAY_SONNET` follow the same pattern. An empty `USAGE_MONITOR_RESETS_AT_*` indicates that the quota has no active window (either never used, or the previous window has expired).
+Per-quota variables are emitted for every quota that applies to your account - additional variants like `USAGE_MONITOR_UTILIZATION_SEVEN_DAY_SONNET` follow the same pattern. A quota type the API lists but has not activated for your account gets no variables at all, so check that a variable is set before relying on it. An empty `USAGE_MONITOR_RESETS_AT_*` indicates that the quota has no active window (either never used, or the previous window has expired).
 
 ### `quick_action_command`
 
@@ -265,4 +265,4 @@ Fires when you trigger the quick action. Receives the same full quota state as `
 | `USAGE_MONITOR_EXTRA_USED` | `$8.20` | Amount spent (only set when extra usage is enabled) |
 | `USAGE_MONITOR_EXTRA_LIMIT` | `$10.00` | Monthly limit (only set when extra usage is enabled) |
 
-Per-quota variables are emitted for every quota field the API returns, following the same pattern as `on_startup_command`. If you trigger it before the first successful update, only `USAGE_MONITOR_EVENT` is set.
+Per-quota variables are emitted for every quota that applies to your account, following the same pattern as `on_startup_command`. If you trigger it before the first successful update, only `USAGE_MONITOR_EVENT` is set.

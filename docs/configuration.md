@@ -96,9 +96,9 @@ The popup shows usage bars for all active quota types by default. Use `popup_fie
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `popup_fields` | `["*"]` | Which usage fields to show in the popup, in order. `"*"` is a wildcard meaning "all remaining non-null fields in default order" |
+| `popup_fields` | `["*"]` | Which usage fields to show in the popup, in order. `"*"` is a wildcard meaning "all remaining active quota types in default order" |
 
-Must be an array of non-empty strings. `"*"` may appear at most once. Duplicates are silently removed. Unknown field names are accepted - if a field is `null` or missing from the API response, it is simply skipped.
+Must be an array of non-empty strings. `"*"` may appear at most once. Duplicates are silently removed. Unknown field names are accepted. A field is skipped when it is `null` or missing from the API response, and also when it names a quota type that does not apply to your account - the API lists some under internal code names before they take effect.
 
 **Known field names:** `five_hour`, `seven_day`, `seven_day_sonnet`, `seven_day_opus`, `seven_day_cowork`, `seven_day_oauth_apps`
 
@@ -108,7 +108,7 @@ Must be an array of non-empty strings. `"*"` may appear at most once. Duplicates
 
 | Setting | Result |
 |---------|--------|
-| *(not set)* | All non-null fields in default order |
+| *(not set)* | All active quota types in default order |
 | `["five_hour", "seven_day_sonnet", "*"]` | Session first, then Sonnet, then all remaining |
 | `["five_hour", "seven_day"]` | Only these two, everything else hidden |
 | `["*"]` | Same as not set |
