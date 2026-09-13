@@ -103,7 +103,6 @@ class TestRedactHome(unittest.TestCase):
                 self.assertEqual(_redact_home(resolved), f'~{os.sep}.claude{os.sep}.credentials.json')
                 self.assertEqual(_redact_home(str(linked_home / 'venv' / 'python')), f'~{os.sep}venv{os.sep}python')
 
-
     def test_unresolvable_home_still_redacts(self):
         """Resolving the home directory fails behind a symlink loop and on an
         unreachable network path - the diagnostics must still print, with the
