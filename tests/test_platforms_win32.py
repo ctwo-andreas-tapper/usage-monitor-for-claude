@@ -304,7 +304,7 @@ class _DefaultConfigDirTestCase(unittest.TestCase):
     """Base class pinning the default config dir (no suffix, no --config-dir)."""
 
     def setUp(self):
-        patcher_suffix = patch.object(win32, 'autostart_suffix', return_value='')
+        patcher_suffix = patch.object(win32, 'launch_suffix', return_value='')
         patcher_argument = patch.object(win32, 'autostart_config_dir_argument', return_value=None)
         patcher_suffix.start()
         patcher_argument.start()
@@ -469,7 +469,7 @@ class TestCustomConfigDirAutostart(unittest.TestCase):
     """Per-instance registry naming and command for a non-default config dir."""
 
     def setUp(self):
-        patcher_suffix = patch.object(win32, 'autostart_suffix', return_value='_abc123def456')
+        patcher_suffix = patch.object(win32, 'launch_suffix', return_value='_abc123def456')
         patcher_argument = patch.object(win32, 'autostart_config_dir_argument', return_value=r'C:\Users\test\.claude-second')
         patcher_suffix.start()
         patcher_argument.start()

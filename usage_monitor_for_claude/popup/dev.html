@@ -62,6 +62,7 @@
     <button onclick="loadPreset('error')">Error state</button>
     <button onclick="loadPreset('refreshing')">Refreshing (hours)</button>
     <button onclick="loadPreset('loading')">Initial load</button>
+    <button onclick="loadPreset('two_accounts')">Two accounts</button>
     <button onclick="randomize()">Randomize bars</button>
 </div>
 
@@ -142,6 +143,34 @@ const PRESETS = {
         profile: null, usage: [], extra: null, installations: [],
         status: { staticKey: 'status_refreshing', is_error: false, refreshing: true },
     },
+    two_accounts: {
+        accounts: [
+            {
+                label: 'work', email: 'user@example.com', plan: 'Max',
+                usage: [
+                    { unit: 'hour', suffix: '5hr', pct: 40, warn: false,
+                      reset: { kind: 'in', duration: '2h 30m', clock: '14:30' }, dividers: [0.2, 0.4, 0.6, 0.8], marker_rel: 0.35 },
+                    { unit: 'week', suffix: '7 day', pct: 65, warn: true,
+                      reset: { kind: 'weekday', day: 'Sat', clock: '12:00' }, dividers: [0.143, 0.286, 0.429, 0.571, 0.714, 0.857], marker_rel: 0.55 },
+                ],
+                extra: { pct: 23, used: '$4.60', limit: '$20.00', balance: '$55.97' },
+            },
+            {
+                label: 'personal', email: 'second@example.com', plan: 'Pro',
+                usage: [
+                    { unit: 'hour', suffix: '5hr', pct: 70, warn: true,
+                      reset: { kind: 'in', duration: '1h 10m', clock: '13:10' }, dividers: [0.2, 0.4, 0.6, 0.8], marker_rel: 0.5 },
+                    { unit: 'week', suffix: '7 day', pct: 20, warn: false,
+                      reset: { kind: 'weekday', day: 'Sat', clock: '12:00' }, dividers: [0.143, 0.286, 0.429, 0.571, 0.714, 0.857], marker_rel: 0.55 },
+                    { unit: 'week', suffix: 'Fable', pct: 5, warn: false,
+                      reset: { kind: 'weekday', day: 'Sat', clock: '12:00' }, dividers: [0.143, 0.286, 0.429, 0.571, 0.714, 0.857], marker_rel: 0.55 },
+                ],
+                extra: null,
+            },
+        ],
+        installations: [{ name: 'CLI', version: '2.1.69' }],
+        status: () => ({ last_success_time: now() - 3, next_poll_time: now() + 20, refreshing: false, error: null }),
+    },
 };
 
 const iframe = document.getElementById('popup');
@@ -156,7 +185,7 @@ let currentPreset = 'full';
 // Map locale JSON keys onto the compact translation object popup.js expects.
 function buildTranslations(loc) {
     return {
-        title: loc.popup_title, account: loc.account, email: loc.email, plan: loc.plan,
+        title: loc.popup_title, account: loc.account, accounts: loc.accounts, email: loc.email, plan: loc.plan,
         usage: loc.usage, extra_usage: loc.extra_usage, claude_code: loc.claude_code, changelog: loc.changelog,
         status_updated_s: loc.status_updated_s, status_updated: loc.status_updated,
         status_next_update: loc.status_next_update, status_refreshing: loc.status_refreshing,
@@ -184,34 +213,85 @@ function localizeReset(loc, reset) {
     return '';
 }
 
-// Build the data snapshot popup.js consumes from a preset + the active locale.
-function resolveData(name, loc) {
-    const preset = PRESETS[name];
-
-    const usage = (preset.usage || []).map((entry) => ({
+// One usage bar for a single account's quota entry.
+function usageBar(loc, entry, accountIndex) {
+    return {
         key: fieldKey(entry),
         label: localizeLabel(loc, entry),
+        account_index: accountIndex,
         pct_text: entry.pct + '%',
         fill_pct: entry.pct / 100,
         warn: entry.warn,
         reset_text: localizeReset(loc, entry.reset),
         dividers: entry.dividers,
         marker_rel: entry.marker_rel,
-    }));
+    };
+}
 
-    const extra = preset.extra ? {
-        pct_text: preset.extra.pct + '%',
-        fill_pct: preset.extra.pct / 100,
-        spent_text: loc.extra_usage_spent.replace('{used}', preset.extra.used).replace('{limit}', preset.extra.limit),
-        balance_text: preset.extra.balance ? loc.extra_usage_balance.replace('{balance}', preset.extra.balance) : '',
-    } : null;
+// Fold each account's usage into groups keyed by quota model, one bar per
+// reporting account, preserving first-seen order (accounts, then fields).
+function usageGroups(loc, accountUsages) {
+    const order = [];
+    const byKey = {};
+    for (const { index, usage } of accountUsages) {
+        for (const entry of usage || []) {
+            const bar = usageBar(loc, entry, index);
+            if (!byKey[bar.key]) {
+                byKey[bar.key] = { key: bar.key, label: bar.label, bars: [] };
+                order.push(bar.key);
+            }
+            byKey[bar.key].bars.push(bar);
+        }
+    }
+    return order.map((key) => byKey[key]);
+}
 
+function extraEntry(loc, extra, accountIndex) {
+    if (!extra) return null;
+    return {
+        account_index: accountIndex,
+        has_limit: true,
+        pct_text: extra.pct + '%',
+        fill_pct: extra.pct / 100,
+        spent_text: loc.extra_usage_spent.replace('{used}', extra.used).replace('{limit}', extra.limit),
+        balance_text: extra.balance ? loc.extra_usage_balance.replace('{balance}', extra.balance) : '',
+    };
+}
+
+function resolveStatus(preset, loc) {
     let status = typeof preset.status === 'function' ? preset.status() : preset.status;
     if (status && status.staticKey) {
         status = { text: loc[status.staticKey], is_error: status.is_error, refreshing: status.refreshing };
     }
+    return status;
+}
 
-    return { profile: preset.profile, usage, extra, installations: preset.installations || [], status };
+// Build the payload popup.js consumes from a preset + the active locale.  A
+// preset is either multi-account (`accounts`) or single-account (`profile`).
+function resolveData(name, loc) {
+    const preset = PRESETS[name];
+
+    if (preset.accounts) {
+        const accounts = preset.accounts.map((account, index) => ({
+            index, label: account.label, email: account.email || '', plan: account.plan || '',
+            error: account.error || null, refreshing: false,
+        }));
+        const usage_groups = usageGroups(loc, preset.accounts.map((account, index) => ({ index, usage: account.usage })));
+        const extra = [];
+        preset.accounts.forEach((account, index) => {
+            const entry = extraEntry(loc, account.extra, index);
+            if (entry) extra.push(entry);
+        });
+        return { accounts, usage_groups, extra, installations: preset.installations || [], status: resolveStatus(preset, loc) };
+    }
+
+    const accounts = preset.profile
+        ? [{ index: 0, label: 'default', email: preset.profile.email || '', plan: preset.profile.plan || '', error: null, refreshing: false }]
+        : [];
+    const usage_groups = usageGroups(loc, [{ index: 0, usage: preset.usage }]);
+    const singleExtra = extraEntry(loc, preset.extra, 0);
+    const extra = singleExtra ? [singleExtra] : [];
+    return { accounts, usage_groups, extra, installations: preset.installations || [], status: resolveStatus(preset, loc) };
 }
 
 // Try both layouts: server rooted at the repo (dev.html under
@@ -265,16 +345,18 @@ function randomize() {
     location.hash = 'randomize';
     currentPreset = 'full';
     const data = resolveData('full', currentLocale);
-    for (const entry of data.usage) {
+    for (const group of data.usage_groups) {
+        for (const bar of group.bars) {
+            const pct = Math.round(Math.random() * 100);
+            bar.fill_pct = pct / 100;
+            bar.pct_text = pct + '%';
+            bar.warn = bar.marker_rel !== null && pct / 100 > bar.marker_rel;
+        }
+    }
+    for (const entry of data.extra) {
         const pct = Math.round(Math.random() * 100);
         entry.fill_pct = pct / 100;
         entry.pct_text = pct + '%';
-        entry.warn = entry.marker_rel !== null && pct / 100 > entry.marker_rel;
-    }
-    if (data.extra) {
-        const pct = Math.round(Math.random() * 100);
-        data.extra.fill_pct = pct / 100;
-        data.extra.pct_text = pct + '%';
     }
     win().updateData(data);
 }

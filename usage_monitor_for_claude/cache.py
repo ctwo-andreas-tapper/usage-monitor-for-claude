@@ -15,6 +15,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+from .account import Account
 from .api import fetch_prepaid_credits, fetch_profile, fetch_usage, read_access_token
 from .claude_cli import RefreshResult, refresh_token
 from .settings import MAX_BACKOFF, POLL_FAST, POLL_INTERVAL
@@ -64,10 +65,12 @@ class UsageCache:
     """Thread-safe cache managing API data, cooldown, and error state.
 
     All callers (poll loop, popup) go through ``update()`` instead
-    of calling ``fetch_usage()`` directly.
+    of calling ``fetch_usage()`` directly.  One cache exists per
+    monitored account.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, account: Account) -> None:
+        self.account = account
         self._lock = threading.Lock()
         self._state_lock = threading.Lock()
         self._profile_lock = threading.Lock()
@@ -158,12 +161,12 @@ class UsageCache:
             account has its own quota and cannot be the source of the
             backoff, so its identity must be readable right away.
         """
-        current_token = read_access_token()
+        current_token = read_access_token(self.account)
         if self._profile is not None and self._profile_token == current_token:
             return
 
         with self._profile_lock:
-            current_token = read_access_token()
+            current_token = read_access_token(self.account)
             if self._profile is not None and self._profile_token == current_token:
                 return
 
@@ -177,7 +180,7 @@ class UsageCache:
 
             log.info('fetch_profile started')
             with self._lock:
-                profile = fetch_profile()
+                profile = fetch_profile(self.account)
             with self._state_lock:
                 self._profile = profile
                 self._profile_token = current_token
@@ -236,7 +239,7 @@ class UsageCache:
             return UpdateResult(data=None)
 
         if self._last_failed_token is not None:
-            if read_access_token() == self._last_failed_token:
+            if read_access_token(self.account) == self._last_failed_token:
                 log.debug('update skipped (token unchanged after auth failure)')
                 return UpdateResult(data=None)
             self._last_failed_token = None
@@ -255,9 +258,9 @@ class UsageCache:
 
     def _fetch_and_process(self) -> UpdateResult:
         """Fetch usage data and process the response."""
-        token_before = read_access_token()
+        token_before = read_access_token(self.account)
         log.info('fetch_usage started')
-        data = fetch_usage()
+        data = fetch_usage(self.account)
 
         if 'error' in data:
             self._record_error(data)
@@ -317,7 +320,7 @@ class UsageCache:
         if not org_uuid:
             return None
 
-        prepaid = fetch_prepaid_credits(org_uuid)
+        prepaid = fetch_prepaid_credits(self.account, org_uuid)
         log.debug('fetch_prepaid_credits -> %s', 'OK' if prepaid else 'unavailable')
 
         return prepaid
@@ -407,15 +410,15 @@ class UsageCache:
         """
         result = RefreshResult(success=True, updated=False, old_version='', new_version='', error='')
 
-        current_token = read_access_token()
+        current_token = read_access_token(self.account)
         if current_token in (token_before, None):
             # Token unchanged - refresh it via the CLI (claude update).
-            result = refresh_token()
+            result = refresh_token(self.account)
             if not result.success:
                 log.info('token refresh failed: %s', result.error)
                 return None, None
 
-            current_token = read_access_token()
+            current_token = read_access_token(self.account)
             if current_token == token_before:
                 log.info('token refresh succeeded but token unchanged')
                 return None, None
@@ -424,7 +427,7 @@ class UsageCache:
         else:
             log.info('token already changed, retrying fetch_usage without CLI refresh')
 
-        data = fetch_usage()
+        data = fetch_usage(self.account)
         if 'error' not in data:
             log.info('retry -> OK')
             self._record_success(data, current_token, self._fetch_prepaid_balance(data))

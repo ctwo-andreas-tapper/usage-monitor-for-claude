@@ -22,7 +22,7 @@ from typing import Any, Callable, TextIO
 
 from PIL import ImageFont
 
-from ..instance_id import autostart_config_dir_argument, autostart_suffix
+from ..instance_id import autostart_config_dir_argument, launch_suffix
 
 __all__ = [
     'AUTOSTART_REG_BASE_NAME', 'AUTOSTART_REG_KEY', 'DIAGNOSTIC_PACKAGES', 'ask_yes_no',
@@ -247,7 +247,7 @@ def watch_theme_change(callback: Callable[[], None]) -> None:
 
 def _autostart_reg_name() -> str:
     """Return the registry value name for this launch (one account or a set)."""
-    return AUTOSTART_REG_BASE_NAME + autostart_suffix()
+    return AUTOSTART_REG_BASE_NAME + launch_suffix()
 
 
 def _autostart_command() -> str:

@@ -9,20 +9,27 @@ from __future__ import annotations
 
 import unittest
 from datetime import datetime, timezone
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from usage_monitor_for_claude.account import Account
 from usage_monitor_for_claude.app import (
-    POLL_FAST, RESET_BUFFER, UsageMonitorForClaude, _align_to_reset,
+    POLL_FAST, RESET_BUFFER, AccountMonitor, UsageMonitorForClaude, _align_to_reset,
 )
 from usage_monitor_for_claude.cache import UpdateResult
 from usage_monitor_for_claude.claude_cli import RefreshResult
 
+_ACCOUNT_A = Account(Path('/claude/a'), 'a')
+_ACCOUNT_B = Account(Path('/claude/b'), 'b')
 
-def _make_app(thresholds: list[float] | None = None) -> UsageMonitorForClaude:
-    """Create a UsageMonitorForClaude with mocked icon and configurable thresholds.
+
+def _make_shell(accounts: list[Account] | None = None, thresholds: list[float] | None = None) -> UsageMonitorForClaude:
+    """Create a shell with mocked icons and configurable thresholds (default: one account).
 
     Parameters
     ----------
+    accounts : list[Account] or None
+        Accounts to monitor.  Defaults to a single ``_ACCOUNT_A``.
     thresholds : list[float] or None
         Alert thresholds to use for all variants.  Defaults to ``[80, 95]``.
     """
@@ -31,33 +38,48 @@ def _make_app(thresholds: list[float] | None = None) -> UsageMonitorForClaude:
     with patch('usage_monitor_for_claude.app.pystray'), \
          patch('usage_monitor_for_claude.app.create_icon_image'), \
          patch('usage_monitor_for_claude.app.taskbar_uses_light_theme', return_value=False):
-        app = UsageMonitorForClaude()
-    app.icon = MagicMock()
-    # Patches active for the app's lifetime, stopped by _cleanup.  The presence
+        shell = UsageMonitorForClaude(accounts or [_ACCOUNT_A])
+    for monitor in shell.monitors:
+        monitor.icon = MagicMock()
+    # Patches active for the shell's lifetime, stopped by _cleanup.  The presence
     # defaults keep _is_user_away() False so notification tests are deterministic
     # regardless of the real machine's idle/lock state (idle/lock tests override).
     # ICON_FIELDS is pinned to its default so render tests do not inherit a
     # usage-monitor-settings.json present on the machine running the suite
     # (tests for custom fields override it per test).
-    app._patches = [
+    shell._patches = [
         patch('usage_monitor_for_claude.app.get_alert_thresholds', return_value=thresholds),
         patch('usage_monitor_for_claude.app.is_workstation_locked', return_value=False),
         patch('usage_monitor_for_claude.app.is_screensaver_running', return_value=False),
         patch('usage_monitor_for_claude.app.get_idle_seconds', return_value=0.0),
         patch('usage_monitor_for_claude.app.ICON_FIELDS', ['five_hour', 'seven_day']),
     ]
-    for active_patch in app._patches:
+    for active_patch in shell._patches:
         active_patch.start()
-    return app
+    return shell
 
 
-def _cleanup(app: UsageMonitorForClaude) -> None:
-    """Stop patches started by _make_app."""
+def _make_app(thresholds: list[float] | None = None) -> AccountMonitor:
+    """Create a single-account monitor (the unit most existing tests target).
+
+    Parameters
+    ----------
+    thresholds : list[float] or None
+        Alert thresholds to use for all variants.  Defaults to ``[80, 95]``.
+    """
+    shell = _make_shell(thresholds=thresholds)
+    monitor = shell.monitors[0]
+    monitor._patches = shell._patches
+    return monitor
+
+
+def _cleanup(app) -> None:
+    """Stop patches started by _make_app / _make_shell."""
     for active_patch in app._patches:
         active_patch.stop()
 
 
-def _returns_from_away(app: UsageMonitorForClaude):
+def _returns_from_away(app: AccountMonitor):
     """Return a _polling_throttled stub that reports away, then present, then ends the loop.
 
     The loop reads the state once before the wait (away) and once at the end of
@@ -74,7 +96,7 @@ def _returns_from_away(app: UsageMonitorForClaude):
     return polling_throttled
 
 
-def _stop_after_one_pass(app: UsageMonitorForClaude):
+def _stop_after_one_pass(app: AccountMonitor):
     """Return a _polling_throttled stub that ends poll_loop after one wait pass.
 
     The loop reads the throttle state once before the wait and once at the end
@@ -1058,7 +1080,7 @@ class TestRenderTray(unittest.TestCase):
     def test_success_renders_icon(self, mock_icon, _tooltip):
         """Successful data renders usage icon."""
         self.app._last_response = {'five_hour': {'utilization': 42.0}, 'seven_day': {'utilization': 10.0}}
-        self.app._render_tray()
+        self.app.render_tray()
 
         mock_icon.assert_called_once_with(42.0, 10.0, False, mode_top='utilization', mode_bottom='utilization', time_pct_top=None, time_pct_bottom=None, extra_usage_available=False)
         self.assertEqual(self.app.icon.title, 'Usage: 42%')
@@ -1068,7 +1090,7 @@ class TestRenderTray(unittest.TestCase):
     def test_error_renders_exclamation(self, mock_status, _tooltip):
         """Error data renders '!' status icon."""
         self.app._last_response = {'error': 'server down'}
-        self.app._render_tray()
+        self.app.render_tray()
 
         mock_status.assert_called_once_with('!', False)
 
@@ -1077,7 +1099,7 @@ class TestRenderTray(unittest.TestCase):
     def test_auth_error_renders_c_exclamation(self, mock_status, _tooltip):
         """Auth error data renders 'C!' status icon."""
         self.app._last_response = {'error': 'expired', 'auth_error': True}
-        self.app._render_tray()
+        self.app.render_tray()
 
         mock_status.assert_called_once_with('C!', False)
 
@@ -1086,7 +1108,7 @@ class TestRenderTray(unittest.TestCase):
     def test_missing_utilization_defaults_to_zero(self, mock_icon, _tooltip):
         """Missing utilization values default to 0."""
         self.app._last_response = {'five_hour': {}, 'seven_day': {'utilization': None}}
-        self.app._render_tray()
+        self.app.render_tray()
 
         mock_icon.assert_called_once_with(0, 0, False, mode_top='utilization', mode_bottom='utilization', time_pct_top=None, time_pct_bottom=None, extra_usage_available=False)
 
@@ -1099,7 +1121,7 @@ class TestRenderTray(unittest.TestCase):
             'five_hour': {'utilization': 30.0},
             'seven_day_sonnet': {'utilization': 75.0},
         }
-        self.app._render_tray()
+        self.app.render_tray()
 
         mock_icon.assert_called_once_with(75.0, 30.0, False, mode_top='utilization', mode_bottom='utilization', time_pct_top=None, time_pct_bottom=None, extra_usage_available=False)
 
@@ -1109,7 +1131,7 @@ class TestRenderTray(unittest.TestCase):
     def test_icon_fields_missing_from_response_defaults_to_zero(self, mock_icon, _tooltip):
         """Icon field not present in API response defaults to 0%."""
         self.app._last_response = {'five_hour': {'utilization': 42.0}}
-        self.app._render_tray()
+        self.app.render_tray()
 
         mock_icon.assert_called_once_with(0, 42.0, False, mode_top='utilization', mode_bottom='utilization', time_pct_top=None, time_pct_bottom=None, extra_usage_available=False)
 
@@ -1119,7 +1141,7 @@ class TestRenderTray(unittest.TestCase):
     def test_icon_fields_null_in_response_defaults_to_zero(self, mock_icon, _tooltip):
         """Icon field present but null in API response defaults to 0%."""
         self.app._last_response = {'five_hour': {'utilization': 42.0}, 'seven_day_sonnet': None}
-        self.app._render_tray()
+        self.app.render_tray()
 
         mock_icon.assert_called_once_with(0, 42.0, False, mode_top='utilization', mode_bottom='utilization', time_pct_top=None, time_pct_bottom=None, extra_usage_available=False)
 
@@ -1130,7 +1152,7 @@ class TestRenderTray(unittest.TestCase):
         """An icon field holding a non-dict response value (e.g. the limits array)
         renders as 0% instead of crashing the render path."""
         self.app._last_response = {'five_hour': {'utilization': 42.0}, 'limits': [{'percent': 12}]}
-        self.app._render_tray()
+        self.app.render_tray()
 
         mock_icon.assert_called_once_with(0, 42.0, False, mode_top='utilization', mode_bottom='utilization', time_pct_top=None, time_pct_bottom=None, extra_usage_available=False)
 
@@ -1144,7 +1166,7 @@ class TestRenderTray(unittest.TestCase):
             'five_hour': {'utilization': 60.0, 'resets_at': '2025-01-15T18:00:00Z'},
             'seven_day': {'utilization': 20.0},
         }
-        self.app._render_tray()
+        self.app.render_tray()
 
         mock_icon.assert_called_once_with(60.0, 20.0, False, mode_top='overage', mode_bottom='utilization', time_pct_top=40.0, time_pct_bottom=40.0, extra_usage_available=False)
 
@@ -1158,7 +1180,7 @@ class TestRenderTray(unittest.TestCase):
             'five_hour': {'utilization': 30.0, 'resets_at': '2025-01-15T18:00:00Z'},
             'seven_day': {'utilization': 10.0, 'resets_at': '2025-01-20T00:00:00Z'},
         }
-        self.app._render_tray()
+        self.app.render_tray()
 
         mock_icon.assert_called_once_with(30.0, 10.0, False, mode_top='overage', mode_bottom='overage', time_pct_top=50.0, time_pct_bottom=50.0, extra_usage_available=False)
 
@@ -1171,7 +1193,7 @@ class TestRenderTray(unittest.TestCase):
             'five_hour': {'utilization': 42.0, 'resets_at': '2025-01-15T18:00:00Z'},
             'seven_day': {'utilization': 10.0, 'resets_at': '2025-01-20T00:00:00Z'},
         }
-        self.app._render_tray()
+        self.app.render_tray()
 
         mock_icon.assert_called_once_with(42.0, 10.0, False, mode_top='utilization', mode_bottom='utilization', time_pct_top=35.0, time_pct_bottom=35.0, extra_usage_available=False)
 
@@ -1184,7 +1206,7 @@ class TestRenderTray(unittest.TestCase):
             'five_hour': {'utilization': 55.0, 'resets_at': '2025-01-15T18:00:00Z'},
             'seven_day': {'utilization': 25.0},
         }
-        self.app._render_tray()
+        self.app.render_tray()
 
         # pct_top should be 55.0 (not 0), confirming 'five_hour' was used as dict key not 'five_hour:overage'
         call_args = mock_icon.call_args
@@ -1199,7 +1221,7 @@ class TestRenderTray(unittest.TestCase):
             'seven_day': {'utilization': 80.0},
             'extra_usage': {'is_enabled': True, 'monthly_limit': 1000, 'used_credits': 250.0},
         }
-        self.app._render_tray()
+        self.app.render_tray()
 
         self.assertTrue(mock_icon.call_args.kwargs['extra_usage_available'])
 
@@ -1211,7 +1233,7 @@ class TestRenderTray(unittest.TestCase):
             'five_hour': {'utilization': 100.0},
             'extra_usage': {'is_enabled': False, 'monthly_limit': 0, 'used_credits': 0},
         }
-        self.app._render_tray()
+        self.app.render_tray()
 
         self.assertFalse(mock_icon.call_args.kwargs['extra_usage_available'])
 
@@ -1223,7 +1245,7 @@ class TestRenderTray(unittest.TestCase):
             'five_hour': {'utilization': 100.0},
             'extra_usage': {'is_enabled': True, 'monthly_limit': 1000, 'used_credits': 1000.0},
         }
-        self.app._render_tray()
+        self.app.render_tray()
 
         self.assertFalse(mock_icon.call_args.kwargs['extra_usage_available'])
 
@@ -1232,7 +1254,7 @@ class TestRenderTray(unittest.TestCase):
     def test_extra_usage_available_false_when_no_extra_usage_key(self, mock_icon, _tooltip):
         """extra_usage_available is False when the API response omits the extra_usage object entirely."""
         self.app._last_response = {'five_hour': {'utilization': 100.0}}
-        self.app._render_tray()
+        self.app.render_tray()
 
         self.assertFalse(mock_icon.call_args.kwargs['extra_usage_available'])
 
@@ -1241,7 +1263,7 @@ class TestRenderTray(unittest.TestCase):
     def test_extra_usage_available_false_when_extra_usage_null(self, mock_icon, _tooltip):
         """extra_usage_available is False when the extra_usage field is explicitly null."""
         self.app._last_response = {'five_hour': {'utilization': 100.0}, 'extra_usage': None}
-        self.app._render_tray()
+        self.app.render_tray()
 
         self.assertFalse(mock_icon.call_args.kwargs['extra_usage_available'])
 
@@ -1253,7 +1275,7 @@ class TestRenderTray(unittest.TestCase):
             'five_hour': {'utilization': 100.0},
             'extra_usage': {'is_enabled': True, 'monthly_limit': None, 'used_credits': 10631.0},
         }
-        self.app._render_tray()
+        self.app.render_tray()
 
         self.assertTrue(mock_icon.call_args.kwargs['extra_usage_available'])
 
@@ -1265,7 +1287,7 @@ class TestRenderTray(unittest.TestCase):
             'five_hour': {'utilization': 100.0},
             'extra_usage': {'is_enabled': True, 'used_credits': 500.0},
         }
-        self.app._render_tray()
+        self.app.render_tray()
 
         self.assertTrue(mock_icon.call_args.kwargs['extra_usage_available'])
 
@@ -1277,7 +1299,7 @@ class TestRenderTray(unittest.TestCase):
             'five_hour': {'utilization': 100.0},
             'extra_usage': {'is_enabled': False, 'monthly_limit': None, 'used_credits': 0},
         }
-        self.app._render_tray()
+        self.app.render_tray()
 
         self.assertFalse(mock_icon.call_args.kwargs['extra_usage_available'])
 
@@ -1287,10 +1309,11 @@ class TestRenderTray(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestOnThemeChanged(unittest.TestCase):
-    """Tests for _on_theme_changed() theme switch handling."""
+    """Tests for the shell's _on_theme_changed() theme switch handling."""
 
     def setUp(self):
         self.app = _make_app()
+        self.shell = self.app.shell
 
     def tearDown(self):
         _cleanup(self.app)
@@ -1300,32 +1323,32 @@ class TestOnThemeChanged(unittest.TestCase):
     @patch('usage_monitor_for_claude.app.taskbar_uses_light_theme', return_value=True)
     def test_theme_change_re_renders(self, _theme, mock_icon, _tooltip):
         """Theme change re-renders the tray icon."""
-        self.app._light_taskbar = False
+        self.shell._light_taskbar = False
         self.app._last_response = {'five_hour': {'utilization': 50.0}, 'seven_day': {'utilization': 20.0}}
 
-        self.app._on_theme_changed()
+        self.shell._on_theme_changed()
 
-        self.assertTrue(self.app._light_taskbar)
+        self.assertTrue(self.shell._light_taskbar)
         mock_icon.assert_called_once_with(50.0, 20.0, True, mode_top='utilization', mode_bottom='utilization', time_pct_top=None, time_pct_bottom=None, extra_usage_available=False)
 
     @patch('usage_monitor_for_claude.app.taskbar_uses_light_theme', return_value=False)
     def test_same_theme_no_render(self, _theme):
         """No re-render when theme hasn't changed."""
-        self.app._light_taskbar = False
+        self.shell._light_taskbar = False
         self.app._last_response = {'five_hour': {'utilization': 50.0}}
 
-        with patch.object(self.app, '_render_tray') as mock_render:
-            self.app._on_theme_changed()
+        with patch.object(self.app, 'render_tray') as mock_render:
+            self.shell._on_theme_changed()
             mock_render.assert_not_called()
 
     @patch('usage_monitor_for_claude.app.taskbar_uses_light_theme', return_value=True)
     def test_theme_change_without_data_no_render(self, _theme):
         """Theme change without any data does not render."""
-        self.app._light_taskbar = False
+        self.shell._light_taskbar = False
         self.app._last_response = {}
 
-        with patch.object(self.app, '_render_tray') as mock_render:
-            self.app._on_theme_changed()
+        with patch.object(self.app, 'render_tray') as mock_render:
+            self.shell._on_theme_changed()
             mock_render.assert_not_called()
 
 
@@ -1727,28 +1750,28 @@ class TestShouldRefreshUsage(unittest.TestCase):
         """With no data yet, refresh even if a reset is imminent."""
         self.app.cache.last_success_time = None
         with patch.object(self.app, '_seconds_until_next_reset', return_value=30.0):
-            self.assertTrue(self.app._should_refresh_usage())
+            self.assertTrue(self.app.should_refresh_usage())
 
     @patch('usage_monitor_for_claude.app.time.time', return_value=1000.0)
     def test_fresh_data_not_refreshed(self, _mock_time):
         """Data younger than the cooldown is not refreshed."""
         self.app.cache.last_success_time = 1000.0 - (POLL_FAST - 10)
         with patch.object(self.app, '_seconds_until_next_reset', return_value=None):
-            self.assertFalse(self.app._should_refresh_usage())
+            self.assertFalse(self.app.should_refresh_usage())
 
     @patch('usage_monitor_for_claude.app.time.time', return_value=1000.0)
     def test_stale_data_refreshed_without_imminent_reset(self, _mock_time):
         """Stale data refreshes when no reset is imminent."""
         self.app.cache.last_success_time = 1000.0 - (POLL_FAST + 10)
         with patch.object(self.app, '_seconds_until_next_reset', return_value=300.0):
-            self.assertTrue(self.app._should_refresh_usage())
+            self.assertTrue(self.app.should_refresh_usage())
 
     @patch('usage_monitor_for_claude.app.time.time', return_value=1000.0)
     def test_stale_data_deferred_when_reset_imminent(self, _mock_time):
         """Stale data is not refreshed when a reset is within the cooldown."""
         self.app.cache.last_success_time = 1000.0 - (POLL_FAST + 10)
         with patch.object(self.app, '_seconds_until_next_reset', return_value=POLL_FAST - 1):
-            self.assertFalse(self.app._should_refresh_usage())
+            self.assertFalse(self.app.should_refresh_usage())
 
 
 # ---------------------------------------------------------------------------
@@ -1766,14 +1789,15 @@ class TestMenuActions(unittest.TestCase):
 
     def test_on_show_popup_guards_against_double_open(self):
         """on_show_popup() does nothing when popup is already open."""
-        self.app._popup_open = True
+        self.app.shell._popup_open = True
         with patch('usage_monitor_for_claude.app.threading.Thread') as mock_thread:
-            self.app.on_show_popup()
+            self.app.shell.on_show_popup()
             mock_thread.assert_not_called()
 
     def test_on_quit_stops_running(self):
         """on_quit() sets running to False and stops the icon."""
-        self.app.on_quit()
+        self.app.shell.on_quit()
+        self.assertFalse(self.app.shell.running)
         self.assertFalse(self.app.running)
         self.app.icon.stop.assert_called_once()
 
@@ -1862,20 +1886,20 @@ class TestPollingThrottled(unittest.TestCase):
 
     def test_open_popup_overrides_idle(self):
         """An open popup keeps the normal cadence however long the machine sat idle."""
-        self.app._popup_open = True
+        self.app.shell._popup_open = True
         with patch.object(self.app, '_is_user_away', return_value=True):
             self.assertFalse(self.app._polling_throttled())
 
     @patch('usage_monitor_for_claude.app.is_workstation_locked', return_value=True)
     def test_open_popup_behind_lock_screen_throttled(self, _locked):
         """A locked screen hides the popup, so the away cadence applies."""
-        self.app._popup_open = True
+        self.app.shell._popup_open = True
         self.assertTrue(self.app._polling_throttled())
 
     @patch('usage_monitor_for_claude.app.is_screensaver_running', return_value=True)
     def test_open_popup_behind_screensaver_throttled(self, _screensaver):
         """A running screensaver covers the popup, so the away cadence applies."""
-        self.app._popup_open = True
+        self.app.shell._popup_open = True
         with patch.object(self.app, '_is_user_away', return_value=True):
             self.assertTrue(self.app._polling_throttled())
 
@@ -2346,7 +2370,7 @@ class TestTestEventCommands(unittest.TestCase):
     @patch('usage_monitor_for_claude.app.run_event_command')
     def test_reset_5h_fires_with_correct_env(self, mock_cmd):
         """Test reset 5h handler passes all required env vars with correct values."""
-        self.app.on_test_reset_5h()
+        self.app.shell.on_test_reset_5h()
 
         mock_cmd.assert_called_once()
         cmd, env = mock_cmd.call_args[0]
@@ -2367,7 +2391,7 @@ class TestTestEventCommands(unittest.TestCase):
     @patch('usage_monitor_for_claude.app.run_event_command')
     def test_reset_7d_fires_with_correct_env(self, mock_cmd):
         """Test reset 7d handler passes all required env vars with correct values."""
-        self.app.on_test_reset_7d()
+        self.app.shell.on_test_reset_7d()
 
         mock_cmd.assert_called_once()
         cmd, env = mock_cmd.call_args[0]
@@ -2384,7 +2408,7 @@ class TestTestEventCommands(unittest.TestCase):
     @patch('usage_monitor_for_claude.app.run_event_command')
     def test_threshold_5h_fires_with_correct_env(self, mock_cmd):
         """Test threshold 5h handler passes all required env vars with correct values."""
-        self.app.on_test_threshold_5h()
+        self.app.shell.on_test_threshold_5h()
 
         mock_cmd.assert_called_once()
         cmd, env = mock_cmd.call_args[0]
@@ -2401,7 +2425,7 @@ class TestTestEventCommands(unittest.TestCase):
     @patch('usage_monitor_for_claude.app.run_event_command')
     def test_threshold_7d_fires_with_correct_env(self, mock_cmd):
         """Test threshold 7d handler passes all required env vars with correct values."""
-        self.app.on_test_threshold_7d()
+        self.app.shell.on_test_threshold_7d()
 
         mock_cmd.assert_called_once()
         cmd, env = mock_cmd.call_args[0]
@@ -2416,7 +2440,7 @@ class TestTestEventCommands(unittest.TestCase):
     @patch('usage_monitor_for_claude.app.run_event_command')
     def test_reset_5h_resets_at_is_valid_iso_timestamp(self, mock_cmd):
         """USAGE_MONITOR_RESETS_AT is a parseable ISO 8601 timestamp in the future."""
-        self.app.on_test_reset_5h()
+        self.app.shell.on_test_reset_5h()
 
         env = mock_cmd.call_args[0][1]
         resets_at = datetime.fromisoformat(env['USAGE_MONITOR_RESETS_AT'])
@@ -2426,7 +2450,7 @@ class TestTestEventCommands(unittest.TestCase):
     @patch('usage_monitor_for_claude.app.run_event_command')
     def test_threshold_5h_resets_at_is_valid_iso_timestamp(self, mock_cmd):
         """USAGE_MONITOR_RESETS_AT is a parseable ISO 8601 timestamp in the future."""
-        self.app.on_test_threshold_5h()
+        self.app.shell.on_test_threshold_5h()
 
         env = mock_cmd.call_args[0][1]
         resets_at = datetime.fromisoformat(env['USAGE_MONITOR_RESETS_AT'])
@@ -2436,7 +2460,7 @@ class TestTestEventCommands(unittest.TestCase):
     @patch('usage_monitor_for_claude.app.run_event_command')
     def test_threshold_message_contains_utilization_pct(self, mock_cmd):
         """USAGE_MONITOR_MESSAGE includes the utilization percentage."""
-        self.app.on_test_threshold_5h()
+        self.app.shell.on_test_threshold_5h()
 
         env = mock_cmd.call_args[0][1]
         self.assertIn('82', env['USAGE_MONITOR_MESSAGE'])
@@ -2784,7 +2808,7 @@ class TestPollLoopAccountSwitch(unittest.TestCase):
              patch.object(self.app, '_is_user_away', return_value=False), \
              patch.object(self.app, '_seconds_until_next_reset', return_value=None), \
              patch('usage_monitor_for_claude.app.time.sleep', side_effect=sleep_side_effect), \
-             patch('usage_monitor_for_claude.app.read_access_token', side_effect=lambda: 'tok-b' if switched else 'tok-a'):
+             patch('usage_monitor_for_claude.app.read_access_token', side_effect=lambda *args: 'tok-b' if switched else 'tok-a'):
             self.app.poll_loop()
 
         self.assertEqual(force_calls, [False, True])
@@ -3358,7 +3382,7 @@ class TestStartupCommand(unittest.TestCase):
     @patch('usage_monitor_for_claude.app.run_event_command')
     def test_test_menu_handler_passes_expected_env(self, mock_cmd):
         """on_test_startup passes the documented env vars."""
-        self.app.on_test_startup()
+        self.app.shell.on_test_startup()
 
         mock_cmd.assert_called_once()
         cmd, env = mock_cmd.call_args[0]
@@ -3391,7 +3415,7 @@ class TestDoubleClickCommand(unittest.TestCase):
             'seven_day': {'utilization': 55.0, 'resets_at': '2025-01-20T12:00:00Z'},
         }
 
-        self.app._run_quick_action()
+        self.app.shell._run_quick_action()
 
         mock_cmd.assert_called_once()
         cmd, env = mock_cmd.call_args[0]
@@ -3407,7 +3431,7 @@ class TestDoubleClickCommand(unittest.TestCase):
         """A double-click is user-driven, so it requests output capture (error dialog on failure)."""
         self.app._last_response = {'five_hour': {'utilization': 10.0}}
 
-        self.app._run_quick_action()
+        self.app.shell._run_quick_action()
 
         self.assertTrue(mock_cmd.call_args[1].get('capture_output'))
 
@@ -3417,7 +3441,7 @@ class TestDoubleClickCommand(unittest.TestCase):
         """A late non-zero exit (crash, kill, replaced instance) must not raise a dialog long after the click."""
         self.app._last_response = {'five_hour': {'utilization': 10.0}}
 
-        self.app._run_quick_action()
+        self.app.shell._run_quick_action()
 
         self.assertFalse(mock_cmd.call_args[1].get('report_late_failures', True))
 
@@ -3425,7 +3449,7 @@ class TestDoubleClickCommand(unittest.TestCase):
     @patch('usage_monitor_for_claude.app.run_event_command')
     def test_test_menu_handler_reports_late_failures(self, mock_cmd):
         """The 'Test event commands' menu keeps full reporting - there the exit code is the point."""
-        self.app.on_test_quick_action()
+        self.app.shell.on_test_quick_action()
 
         self.assertTrue(mock_cmd.call_args[1].get('report_late_failures', True))
 
@@ -3435,7 +3459,7 @@ class TestDoubleClickCommand(unittest.TestCase):
         """No command runs when QUICK_ACTION_COMMAND is empty."""
         self.app._last_response = {'five_hour': {'utilization': 30.0}}
 
-        self.app._run_quick_action()
+        self.app.shell._run_quick_action()
 
         mock_cmd.assert_not_called()
 
@@ -3445,7 +3469,7 @@ class TestDoubleClickCommand(unittest.TestCase):
         """Double-clicking before any data yields only the event var."""
         self.app._last_response = {}
 
-        self.app._run_quick_action()
+        self.app.shell._run_quick_action()
 
         env = mock_cmd.call_args[0][1]
         self.assertEqual(env['USAGE_MONITOR_EVENT'], 'quick_action')
@@ -3457,7 +3481,7 @@ class TestDoubleClickCommand(unittest.TestCase):
         """An error response contributes no quota vars."""
         self.app._last_response = {'error': 'server down', 'auth_error': True}
 
-        self.app._run_quick_action()
+        self.app.shell._run_quick_action()
 
         env = mock_cmd.call_args[0][1]
         self.assertEqual(env['USAGE_MONITOR_EVENT'], 'quick_action')
@@ -3472,7 +3496,7 @@ class TestDoubleClickCommand(unittest.TestCase):
             'extra_usage': {'is_enabled': True, 'used_credits': 8.20, 'monthly_limit': 10.0},
         }
 
-        self.app._run_quick_action()
+        self.app.shell._run_quick_action()
 
         env = mock_cmd.call_args[0][1]
         self.assertIn('USAGE_MONITOR_EXTRA_USED', env)
@@ -3483,7 +3507,7 @@ class TestDoubleClickCommand(unittest.TestCase):
     @patch('usage_monitor_for_claude.app.run_event_command')
     def test_test_menu_handler_passes_expected_env(self, mock_cmd):
         """on_test_quick_action passes the documented sample env vars."""
-        self.app.on_test_quick_action()
+        self.app.shell.on_test_quick_action()
 
         mock_cmd.assert_called_once()
         cmd, env = mock_cmd.call_args[0]
@@ -3502,17 +3526,18 @@ class TestAutostartWiring(unittest.TestCase):
     """Tests for offering and maintaining the autostart entry."""
 
     def _ready(self, supported):
-        """Run the tray-ready hook with autostart support forced either way."""
-        app = _make_app()
-        self.addCleanup(_cleanup, app)
+        """Run the shell's run() with autostart support forced either way.
 
-        icon = MagicMock()
+        The mocked primary icon's ``run()`` returns at once, so ``run()`` does
+        not block on it here.
+        """
+        shell = _make_shell()
+        self.addCleanup(_cleanup, shell)
+
         with patch('usage_monitor_for_claude.app.autostart_supported', return_value=supported), \
              patch('usage_monitor_for_claude.app.sync_autostart_path') as mock_sync, \
-             patch('usage_monitor_for_claude.app.api_headers', return_value={'x': 'y'}), \
-             patch('usage_monitor_for_claude.app.threading.Thread'), \
-             patch.object(app, 'poll_loop'):
-            app._on_icon_ready(icon)
+             patch('usage_monitor_for_claude.app.watch_theme_change'):
+            shell.run()
 
         return mock_sync
 
@@ -3543,7 +3568,7 @@ class TestDoubleClickWiring(unittest.TestCase):
              patch('usage_monitor_for_claude.app.taskbar_uses_light_theme', return_value=False), \
              patch('usage_monitor_for_claude.app.install_tray_click_handler', return_value=installed) as mock_install, \
              patch('builtins.print') as mock_print:
-            app = UsageMonitorForClaude()
+            app = UsageMonitorForClaude([_ACCOUNT_A])
 
         return app, mock_install, mock_print
 
@@ -3604,6 +3629,110 @@ class TestDoubleClickWiring(unittest.TestCase):
         _icon, on_single, on_double = mock_install.call_args[0]
         self.assertEqual(on_single, app.on_show_popup)
         self.assertEqual(on_double, app._run_quick_action)
+
+
+# ---------------------------------------------------------------------------
+# Multi-account shell
+# ---------------------------------------------------------------------------
+
+class TestMultiAccountShell(unittest.TestCase):
+    """Tests for the shell coordinating several account monitors."""
+
+    def setUp(self):
+        self.shell = _make_shell([_ACCOUNT_A, _ACCOUNT_B])
+        self.addCleanup(_cleanup, self.shell)
+
+    def test_one_monitor_per_account_in_order(self):
+        self.assertEqual([m.account for m in self.shell.monitors], [_ACCOUNT_A, _ACCOUNT_B])
+
+    def test_quit_stops_every_icon_and_loop(self):
+        self.shell.on_quit()
+        for monitor in self.shell.monitors:
+            monitor.icon.stop.assert_called_once()
+            self.assertFalse(monitor.running)
+        self.assertFalse(self.shell.running)
+
+    def test_open_popup_holds_cadence_for_every_account(self):
+        # IDLE_PAUSE must be pinned: a machine whose settings file disables idle
+        # detection (idle_pause: 0) would make _is_user_away() False regardless,
+        # so the closed-popup control below would pass vacuously.
+        with patch('usage_monitor_for_claude.app.get_idle_seconds', return_value=10_000), \
+             patch('usage_monitor_for_claude.app.IDLE_PAUSE', 300):
+            self.shell._popup_open = False
+            for monitor in self.shell.monitors:
+                self.assertTrue(monitor._polling_throttled())
+            self.shell._popup_open = True
+            for monitor in self.shell.monitors:
+                self.assertFalse(monitor._polling_throttled())
+
+    def test_label_prefix_only_with_several_accounts(self):
+        self.assertEqual(self.shell.monitors[0].label_prefix, '[a] ')
+        single = _make_shell([_ACCOUNT_A])
+        self.addCleanup(_cleanup, single)
+        self.assertEqual(single.monitors[0].label_prefix, '')
+
+    def test_notification_title_carries_label(self):
+        monitor = self.shell.monitors[1]
+        monitor._notify_or_defer('reset', 'body', 'Title')
+        monitor.icon.notify.assert_called_once_with('body', '[b] Title')
+
+    def test_event_command_env_carries_account(self):
+        monitor = self.shell.monitors[0]
+        monitor.cache._profile = {'account': {'email': 'a@example.com'}}
+        with patch('usage_monitor_for_claude.app.ON_STARTUP_COMMAND', 'cmd'), \
+             patch('usage_monitor_for_claude.app.run_event_command') as run:
+            monitor._run_startup_command({'five_hour': {'utilization': 1, 'resets_at': None}})
+        env = run.call_args.args[1]
+        self.assertEqual(env['USAGE_MONITOR_ACCOUNT'], 'a')
+        self.assertEqual(env['USAGE_MONITOR_ACCOUNT_EMAIL'], 'a@example.com')
+
+    def test_theme_change_re_renders_every_icon_with_data(self):
+        for monitor in self.shell.monitors:
+            monitor._last_response = {'five_hour': {'utilization': 5, 'resets_at': None}}
+        with patch('usage_monitor_for_claude.app.taskbar_uses_light_theme', return_value=True), \
+             patch('usage_monitor_for_claude.app.create_icon_image') as create:
+            self.shell._on_theme_changed()
+        self.assertEqual(create.call_count, 2)
+        self.assertTrue(self.shell._light_taskbar)
+
+    def test_run_starts_primary_on_calling_thread_rest_detached(self):
+        # Only a blocking run() services a GTK main loop on the default context,
+        # where the detached icons' idle_add callbacks land; so exactly one icon
+        # (the first) must go through run() and every other through run_detached.
+        with patch('usage_monitor_for_claude.app.autostart_supported', return_value=False), \
+             patch('usage_monitor_for_claude.app.watch_theme_change'):
+            self.shell.run()
+        primary = self.shell.monitors[0]
+        primary.icon.run.assert_called_once()
+        primary.icon.run_detached.assert_not_called()
+        for monitor in self.shell.monitors[1:]:
+            monitor.icon.run_detached.assert_called_once()
+            monitor.icon.run.assert_not_called()
+
+    def test_late_ready_icon_stops_itself_after_quit(self):
+        # A quit from another icon's menu can land before this icon exists, where
+        # stop() is a no-op; once ready it must stop itself instead of polling.
+        monitor = self.shell.monitors[1]
+        self.shell.running = False
+        with patch.object(monitor, 'poll_loop') as poll:
+            monitor.on_icon_ready(monitor.icon)
+        monitor.icon.stop.assert_called_once()
+        poll.assert_not_called()
+
+    def test_ready_icon_polls_while_running(self):
+        monitor = self.shell.monitors[1]
+        with patch.object(monitor, 'poll_loop') as poll, \
+             patch('usage_monitor_for_claude.app.api_headers', return_value={'x': 'y'}):
+            monitor.on_icon_ready(monitor.icon)
+        poll.assert_called_once()
+        monitor.icon.stop.assert_not_called()
+
+    def test_quick_action_menu_hidden_only_when_every_icon_installed(self):
+        with patch('usage_monitor_for_claude.app.QUICK_ACTION_COMMAND', 'cmd'):
+            self.shell.double_click_installed = False
+            self.assertTrue(self.shell._quick_action_menu_visible())
+            self.shell.double_click_installed = True
+            self.assertFalse(self.shell._quick_action_menu_visible())
 
 
 if __name__ == '__main__':

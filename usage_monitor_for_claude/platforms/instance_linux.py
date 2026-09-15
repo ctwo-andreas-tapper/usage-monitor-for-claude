@@ -22,7 +22,7 @@ from pathlib import Path
 
 from .. import __version__
 from ..i18n import T
-from ..instance_id import config_dir_suffix
+from ..instance_id import launch_suffix
 from .linux import ask_yes_no, show_topmost_error
 
 __all__ = ['ensure_single_instance', 'release_instance_lock']
@@ -54,13 +54,12 @@ def _lock_directory() -> Path:
 
 
 def _lock_path() -> Path:
-    """Return the per-instance lock file path.
+    """Return this launch's lock file path.
 
-    The name carries a config-dir suffix so one monitor instance per Claude
-    account can run concurrently, each a singleton for its own config
-    directory.
+    The name carries a launch suffix so a second launch of the same account
+    set exits, while a different set runs alongside.
     """
-    return _lock_directory() / f'{_LOCK_BASE_NAME}{config_dir_suffix()}.lock'
+    return _lock_directory() / f'{_LOCK_BASE_NAME}{launch_suffix()}.lock'
 
 
 def _read_holder_info() -> tuple[int | None, str | None]:

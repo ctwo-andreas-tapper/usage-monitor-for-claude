@@ -32,7 +32,7 @@ class _LockTestCase(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
-        suffix = patch.object(si, 'config_dir_suffix', return_value='')
+        suffix = patch.object(si, 'launch_suffix', return_value='')
         suffix.start()
         self.addCleanup(suffix.stop)
 
@@ -61,7 +61,7 @@ class TestLockPath(unittest.TestCase):
     def test_config_dir_gets_own_lock(self):
         """A second monitored account is a singleton for itself only."""
         with patch.object(si, '_lock_directory', return_value=Path('/run')), \
-             patch.object(si, 'config_dir_suffix', return_value='-abc'):
+             patch.object(si, 'launch_suffix', return_value='-abc'):
             self.assertEqual(si._lock_path(), Path('/run/usage-monitor-for-claude-abc.lock'))
 
 

@@ -8,8 +8,10 @@ snapshot consistency, and state management.
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
+from usage_monitor_for_claude.account import Account
 from usage_monitor_for_claude.cache import CacheSnapshot, UpdateResult, UsageCache
 from usage_monitor_for_claude.claude_cli import RefreshResult
 
@@ -18,10 +20,50 @@ _ERROR_DATA = {'error': 'server down'}
 _AUTH_ERROR_DATA = {'error': 'expired', 'auth_error': True}
 _SERVER_MSG_DATA = {'error': 'HTTP 429', 'server_message': 'Rate limited.'}
 
+_ACCOUNT = Account(Path('/claude/test'), 'test')
+
 
 def _make_cache() -> UsageCache:
-    """Create a fresh UsageCache instance."""
-    return UsageCache()
+    """Create a fresh UsageCache for the test account."""
+    return UsageCache(_ACCOUNT)
+
+
+# ---------------------------------------------------------------------------
+# Account pass-through
+# ---------------------------------------------------------------------------
+
+class TestAccountPassThrough(unittest.TestCase):
+    """Every credential-touching call names the cache's account."""
+
+    @patch('usage_monitor_for_claude.cache.read_access_token', return_value='tok')
+    @patch('usage_monitor_for_claude.cache.fetch_usage', return_value=_SUCCESS_DATA)
+    def test_update_passes_account(self, mock_fetch, mock_token):
+        _make_cache().update()
+        mock_fetch.assert_called_once_with(_ACCOUNT)
+        mock_token.assert_called_with(_ACCOUNT)
+
+    @patch('usage_monitor_for_claude.cache.read_access_token', return_value='tok')
+    @patch('usage_monitor_for_claude.cache.fetch_profile', return_value={'account': {'uuid': 'u'}})
+    def test_ensure_profile_passes_account(self, mock_profile, _mock_token):
+        _make_cache().ensure_profile()
+        mock_profile.assert_called_once_with(_ACCOUNT)
+
+    @patch('usage_monitor_for_claude.cache.read_access_token', return_value='tok')
+    @patch('usage_monitor_for_claude.cache.fetch_prepaid_credits', return_value=None)
+    @patch('usage_monitor_for_claude.cache.fetch_usage', return_value={'five_hour': {'utilization': 1}, 'extra_usage': {'is_enabled': True}})
+    def test_prepaid_passes_account(self, _mock_fetch, mock_prepaid, _mock_token):
+        cache = _make_cache()
+        cache._profile = {'organization': {'uuid': '12345678-1234-1234-1234-123456789abc'}}
+        cache.update()
+        mock_prepaid.assert_called_once_with(_ACCOUNT, '12345678-1234-1234-1234-123456789abc')
+
+    @patch('usage_monitor_for_claude.cache.refresh_token')
+    @patch('usage_monitor_for_claude.cache.read_access_token', return_value='tok-a')
+    @patch('usage_monitor_for_claude.cache.fetch_usage', return_value=_AUTH_ERROR_DATA)
+    def test_refresh_passes_account(self, _mock_fetch, _mock_token, mock_refresh):
+        mock_refresh.return_value = RefreshResult(success=False, updated=False, old_version='', new_version='', error='x')
+        _make_cache().update()
+        mock_refresh.assert_called_once_with(_ACCOUNT)
 
 
 # ---------------------------------------------------------------------------
@@ -325,7 +367,7 @@ class TestRefreshingFlag(unittest.TestCase):
         cache = _make_cache()
         observed = []
 
-        def capture():
+        def capture(account):
             observed.append(cache.refreshing)
             return _SUCCESS_DATA
 
@@ -1011,7 +1053,7 @@ class TestPrepaidBalance(unittest.TestCase):
 
         cache.update()
 
-        mock_prepaid.assert_called_once_with('org-uuid-1')
+        mock_prepaid.assert_called_once_with(_ACCOUNT, 'org-uuid-1')
         self.assertEqual(cache.prepaid, _PREPAID_BALANCE)
         self.assertEqual(cache.snapshot.prepaid, _PREPAID_BALANCE)
 
@@ -1081,7 +1123,7 @@ class TestPrepaidBalance(unittest.TestCase):
 
         cache.update()
 
-        mock_prepaid.assert_called_once_with('org-uuid-1')
+        mock_prepaid.assert_called_once_with(_ACCOUNT, 'org-uuid-1')
         self.assertEqual(cache.prepaid, _PREPAID_BALANCE)
 
     @patch('usage_monitor_for_claude.cache.fetch_prepaid_credits')

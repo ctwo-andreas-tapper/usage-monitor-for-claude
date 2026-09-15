@@ -51,75 +51,13 @@ class TestLoadSettings(unittest.TestCase):
             result = _load(Path(app_tmp), Path(home_tmp))
         self.assertEqual(result, settings)
 
-    def test_custom_config_dir_fallback(self):
-        """Falls back to CLAUDE_CONFIG_DIR when no file next to app."""
-        with TemporaryDirectory() as app_tmp, TemporaryDirectory() as config_tmp:
-            config_dir = Path(config_tmp)
-            settings = {'bg': '#111111'}
-            (config_dir / settings_mod.SETTINGS_FILENAME).write_text(json.dumps(settings), encoding='utf-8')
-            fake_file = str(Path(app_tmp) / 'usage_monitor_for_claude' / 'settings.py')
-            with patch.object(settings_mod, '__file__', fake_file), \
-                 patch.dict('os.environ', {'CLAUDE_CONFIG_DIR': config_tmp}), \
-                 patch.object(settings_mod, 'show_warning_box', MagicMock()):
-                result = settings_mod._load_settings()
-        self.assertEqual(result, settings)
-
-    def test_home_claude_fallback_with_custom_config_dir(self):
-        """Falls back to ~/.claude/ when CLAUDE_CONFIG_DIR is set but has no settings file."""
+    def test_config_dir_settings_file_is_ignored(self):
+        """One process serves every account, so a per-directory settings file no longer applies."""
         with TemporaryDirectory() as app_tmp, TemporaryDirectory() as home_tmp, TemporaryDirectory() as config_tmp:
-            claude_dir = Path(home_tmp) / '.claude'
-            claude_dir.mkdir()
-            settings = {'bg': '#222222'}
-            (claude_dir / settings_mod.SETTINGS_FILENAME).write_text(json.dumps(settings), encoding='utf-8')
-            fake_file = str(Path(app_tmp) / 'usage_monitor_for_claude' / 'settings.py')
-            with patch.object(settings_mod, '__file__', fake_file), \
-                 patch.object(Path, 'home', return_value=Path(home_tmp)), \
-                 patch.dict('os.environ', {'CLAUDE_CONFIG_DIR': config_tmp}), \
-                 patch.object(settings_mod, 'show_warning_box', MagicMock()):
-                result = settings_mod._load_settings()
-        self.assertEqual(result, settings)
-
-    def test_custom_config_dir_wins_over_home_claude(self):
-        """CLAUDE_CONFIG_DIR settings file takes priority over ~/.claude/."""
-        with TemporaryDirectory() as app_tmp, TemporaryDirectory() as home_tmp, TemporaryDirectory() as config_tmp:
-            claude_dir = Path(home_tmp) / '.claude'
-            claude_dir.mkdir()
-            (claude_dir / settings_mod.SETTINGS_FILENAME).write_text(json.dumps({'bg': '#home'}), encoding='utf-8')
-            (Path(config_tmp) / settings_mod.SETTINGS_FILENAME).write_text(json.dumps({'bg': '#custom'}), encoding='utf-8')
-            fake_file = str(Path(app_tmp) / 'usage_monitor_for_claude' / 'settings.py')
-            with patch.object(settings_mod, '__file__', fake_file), \
-                 patch.object(Path, 'home', return_value=Path(home_tmp)), \
-                 patch.dict('os.environ', {'CLAUDE_CONFIG_DIR': config_tmp}), \
-                 patch.object(settings_mod, 'show_warning_box', MagicMock()):
-                result = settings_mod._load_settings()
-        self.assertEqual(result['bg'], '#custom')
-
-    def test_config_dir_same_as_home_claude_no_duplicate(self):
-        """When CLAUDE_CONFIG_DIR equals ~/.claude/, the path is searched only once."""
-        with TemporaryDirectory() as app_tmp, TemporaryDirectory() as home_tmp:
-            claude_dir = Path(home_tmp) / '.claude'
-            claude_dir.mkdir()
-            settings = {'bg': '#333333'}
-            (claude_dir / settings_mod.SETTINGS_FILENAME).write_text(json.dumps(settings), encoding='utf-8')
-            fake_file = str(Path(app_tmp) / 'usage_monitor_for_claude' / 'settings.py')
-            with patch.object(settings_mod, '__file__', fake_file), \
-                 patch.object(Path, 'home', return_value=Path(home_tmp)), \
-                 patch.dict('os.environ', {'CLAUDE_CONFIG_DIR': str(claude_dir)}), \
-                 patch.object(settings_mod, 'show_warning_box', MagicMock()):
-                result = settings_mod._load_settings()
-        self.assertEqual(result, settings)
-
-    def test_custom_config_dir_wins_over_app_dir(self):
-        """A custom config dir file takes priority over the exe-adjacent file."""
-        with TemporaryDirectory() as app_tmp, TemporaryDirectory() as config_tmp:
-            (Path(app_tmp) / settings_mod.SETTINGS_FILENAME).write_text(json.dumps({'bg': '#app'}), encoding='utf-8')
-            (Path(config_tmp) / settings_mod.SETTINGS_FILENAME).write_text(json.dumps({'bg': '#custom'}), encoding='utf-8')
-            fake_file = str(Path(app_tmp) / 'usage_monitor_for_claude' / 'settings.py')
-            with patch.object(settings_mod, '__file__', fake_file), \
-                 patch.dict('os.environ', {'CLAUDE_CONFIG_DIR': config_tmp}), \
-                 patch.object(settings_mod, 'show_warning_box', MagicMock()):
-                result = settings_mod._load_settings()
-        self.assertEqual(result['bg'], '#custom')
+            (Path(config_tmp) / settings_mod.SETTINGS_FILENAME).write_text(json.dumps({'bg': '#111111'}), encoding='utf-8')
+            with patch.dict('os.environ', {'CLAUDE_CONFIG_DIR': config_tmp}):
+                result = _load(Path(app_tmp), Path(home_tmp))
+        self.assertEqual(result, {})
 
     def test_app_dir_takes_priority(self):
         """File next to app wins over ~/.claude/ file."""

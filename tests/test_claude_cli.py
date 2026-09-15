@@ -17,6 +17,7 @@ from usage_monitor_for_claude.platforms import no_window_kwargs
 from unittest.mock import MagicMock, patch
 
 from usage_monitor_for_claude import claude_cli
+from usage_monitor_for_claude.account import Account
 from usage_monitor_for_claude.claude_cli import (
     ClaudeInstallation,
     RefreshResult,
@@ -24,6 +25,8 @@ from usage_monitor_for_claude.claude_cli import (
     find_installations,
     refresh_token,
 )
+
+_ACCOUNT = Account(Path('/claude/work'), 'work')
 
 
 # ---------------------------------------------------------------------------
@@ -355,7 +358,7 @@ class TestRefreshToken(unittest.TestCase):
     def test_cli_not_found(self, mock_path):
         """Returns error when CLI binary doesn't exist."""
         mock_path.is_file.return_value = False
-        result = refresh_token()
+        result = refresh_token(_ACCOUNT)
         self.assertFalse(result.success)
         self.assertEqual(result.error, 'CLI not found')
 
@@ -368,7 +371,7 @@ class TestRefreshToken(unittest.TestCase):
             stdout='Current version: 2.1.69\nChecking for updates to latest version...\nClaude Code is up to date (2.1.69)\n',
             stderr='', returncode=0,
         )
-        result = refresh_token()
+        result = refresh_token(_ACCOUNT)
         self.assertTrue(result.success)
         self.assertFalse(result.updated)
         self.assertEqual(result.old_version, '2.1.69')
@@ -383,7 +386,7 @@ class TestRefreshToken(unittest.TestCase):
             stdout='Current version: 2.1.38\nChecking for updates to latest version...\nSuccessfully updated from 2.1.38 to version 2.1.69\n',
             stderr='', returncode=0,
         )
-        result = refresh_token()
+        result = refresh_token(_ACCOUNT)
         self.assertTrue(result.success)
         self.assertTrue(result.updated)
         self.assertEqual(result.old_version, '2.1.38')
@@ -395,7 +398,7 @@ class TestRefreshToken(unittest.TestCase):
         """Returns error on timeout."""
         mock_path.is_file.return_value = True
         mock_run.side_effect = subprocess.TimeoutExpired(cmd='claude', timeout=60)
-        result = refresh_token()
+        result = refresh_token(_ACCOUNT)
         self.assertFalse(result.success)
         self.assertEqual(result.error, 'Timeout')
 
@@ -405,7 +408,7 @@ class TestRefreshToken(unittest.TestCase):
         """Returns error on OSError."""
         mock_path.is_file.return_value = True
         mock_run.side_effect = OSError('Permission denied')
-        result = refresh_token()
+        result = refresh_token(_ACCOUNT)
         self.assertFalse(result.success)
         self.assertEqual(result.error, 'Permission denied')
 
@@ -415,7 +418,7 @@ class TestRefreshToken(unittest.TestCase):
         """Unexpected output with returncode 0 still counts as success."""
         mock_path.is_file.return_value = True
         mock_run.return_value = MagicMock(stdout='Something unexpected', stderr='', returncode=0)
-        result = refresh_token()
+        result = refresh_token(_ACCOUNT)
         self.assertTrue(result.success)
         self.assertFalse(result.updated)
 
@@ -425,7 +428,7 @@ class TestRefreshToken(unittest.TestCase):
         """Unexpected output with non-zero returncode is a failure."""
         mock_path.is_file.return_value = True
         mock_run.return_value = MagicMock(stdout='Error: something', stderr='', returncode=1)
-        result = refresh_token()
+        result = refresh_token(_ACCOUNT)
         self.assertFalse(result.success)
         self.assertIn('Error: something', result.error)
 
@@ -435,7 +438,7 @@ class TestRefreshToken(unittest.TestCase):
         """Long error output is truncated to 200 characters."""
         mock_path.is_file.return_value = True
         mock_run.return_value = MagicMock(stdout='X' * 300, stderr='', returncode=1)
-        result = refresh_token()
+        result = refresh_token(_ACCOUNT)
         self.assertEqual(len(result.error), 200)
 
     @patch('usage_monitor_for_claude.claude_cli.subprocess.run')
@@ -446,7 +449,7 @@ class TestRefreshToken(unittest.TestCase):
         mock_run.return_value = MagicMock(
             stdout='updated from 2.1.38 to 2.1.69', stderr='', returncode=0,
         )
-        result = refresh_token()
+        result = refresh_token(_ACCOUNT)
         self.assertTrue(result.updated)
         self.assertEqual(result.old_version, '2.1.38')
         self.assertEqual(result.new_version, '2.1.69')
@@ -459,7 +462,7 @@ class TestRefreshToken(unittest.TestCase):
         mock_run.return_value = MagicMock(
             stdout='', stderr='Claude Code is up to date (2.1.69)', returncode=0,
         )
-        result = refresh_token()
+        result = refresh_token(_ACCOUNT)
         self.assertTrue(result.success)
         self.assertEqual(result.new_version, '2.1.69')
 
@@ -472,7 +475,7 @@ class TestRefreshToken(unittest.TestCase):
         mock_run.return_value = MagicMock(
             stdout='Claude Code is up to date (2.1.69)', stderr='', returncode=0,
         )
-        refresh_token()
+        refresh_token(_ACCOUNT)
         self.assertEqual(mock_run.call_args.kwargs['timeout'], 60)
 
     @patch('usage_monitor_for_claude.claude_cli.subprocess.run')
@@ -488,9 +491,20 @@ class TestRefreshToken(unittest.TestCase):
         mock_run.return_value = MagicMock(
             stdout='Successfully updated from 2.1.38 to version 2.1.69', stderr=None, returncode=0,
         )
-        result = refresh_token()
+        result = refresh_token(_ACCOUNT)
         self.assertFalse(result.success)
         self.assertEqual(result.error, 'CLI output could not be captured')
+
+    @patch('usage_monitor_for_claude.claude_cli.subprocess.run')
+    @patch('usage_monitor_for_claude.claude_cli.CLAUDE_CLI_PATH')
+    def test_cli_runs_with_the_accounts_config_dir(self, mock_path, mock_run):
+        """`claude update` must renew the credentials file of the given account, not the default one."""
+        mock_path.is_file.return_value = True
+        mock_run.return_value = MagicMock(stdout='Claude Code is up to date (2.1.69)\n', stderr='', returncode=0)
+        refresh_token(_ACCOUNT)
+        env = mock_run.call_args.kwargs['env']
+        self.assertEqual(env['CLAUDE_CONFIG_DIR'], str(_ACCOUNT.config_dir))
+        self.assertIn('PATH', env)  # the rest of the environment is inherited
 
 
 # ---------------------------------------------------------------------------
@@ -680,7 +694,7 @@ class TestRefreshTokenIgnoresCliCommand(unittest.TestCase):
         mock_path.is_file.return_value = True
         mock_path.__str__.return_value = r'C:\npm\claude.cmd'
         mock_run.return_value = MagicMock(stdout='Claude Code is up to date (2.1.177)', stderr='', returncode=0)
-        result = refresh_token()
+        result = refresh_token(_ACCOUNT)
         self.assertTrue(result.success)
         self.assertEqual(mock_run.call_args[0][0], [r'C:\npm\claude.cmd', 'update'])
 
@@ -691,7 +705,7 @@ class TestRefreshTokenIgnoresCliCommand(unittest.TestCase):
         """Without a native binary the refresh reports 'CLI not found' rather than
         falling back to the cli_command, which owns different credentials."""
         mock_path.is_file.return_value = False
-        result = refresh_token()
+        result = refresh_token(_ACCOUNT)
         self.assertFalse(result.success)
         self.assertEqual(result.error, 'CLI not found')
         mock_run.assert_not_called()
@@ -707,7 +721,7 @@ class TestRefreshTokenIgnoresCliCommand(unittest.TestCase):
         mock_run.return_value = MagicMock(
             stdout='Successfully updated from 2.1.177 to version 2.1.178', stderr='', returncode=0,
         )
-        refresh_token()
+        refresh_token(_ACCOUNT)
         self.assertEqual(claude_cli._command_version_cache[('wsl', 'claude')], '2.1.204')
 
 
@@ -800,6 +814,12 @@ class TestRunCli(unittest.TestCase):
         mock_run.return_value = MagicMock(stdout='2.1.69 (Claude Code)\n', stderr=None, returncode=0)
         with self.assertRaises(OSError):
             claude_cli._run_cli(['claude', '--version'], timeout=10)
+
+    @patch('usage_monitor_for_claude.claude_cli.subprocess.run')
+    def test_env_defaults_to_inherited(self, mock_run):
+        mock_run.return_value = MagicMock(stdout='', stderr='', returncode=0)
+        claude_cli._run_cli(['claude', '--version'], timeout=1)
+        self.assertNotIn('env', mock_run.call_args.kwargs)
 
 
 if __name__ == '__main__':

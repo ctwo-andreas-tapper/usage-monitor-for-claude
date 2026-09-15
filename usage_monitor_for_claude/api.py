@@ -8,31 +8,31 @@ Anthropic API.  This is the only module that handles credentials.
 Network communication exclusively with ``api.anthropic.com``.
 Credentials used only in HTTP Authorization headers.
 TLS certificates are verified against the Windows certificate store.
+
+Every function names the account it reads credentials for; nothing here
+holds a current config directory.
 """
 from __future__ import annotations
 
 import json
-import os
 import re
-from pathlib import Path
 from typing import Any
 
 import requests
 import truststore
 
+from .account import Account
 from .i18n import T
 
 __all__ = [
-    'API_URL_USAGE', 'API_URL_PROFILE', 'API_URL_PREPAID_CREDITS', 'CLAUDE_CONFIG_DIR', 'CLAUDE_CREDENTIALS',
+    'API_URL_USAGE', 'API_URL_PROFILE', 'API_URL_PREPAID_CREDITS',
     'read_access_token', 'api_headers', 'fetch_usage', 'fetch_profile', 'fetch_prepaid_credits',
 ]
 
-# API endpoints & credentials
+# API endpoints
 API_URL_USAGE = 'https://api.anthropic.com/api/oauth/usage'
 API_URL_PROFILE = 'https://api.anthropic.com/api/oauth/profile'
 API_URL_PREPAID_CREDITS = 'https://api.anthropic.com/api/oauth/organizations/{org_uuid}/prepaid/credits'
-CLAUDE_CONFIG_DIR = Path(os.environ.get('CLAUDE_CONFIG_DIR', '')) if os.environ.get('CLAUDE_CONFIG_DIR') else Path.home() / '.claude'
-CLAUDE_CREDENTIALS = CLAUDE_CONFIG_DIR / '.credentials.json'
 _FALLBACK_USER_AGENT = 'claude-code/2.1.204'
 _ORG_UUID_PATTERN = re.compile(r'\A[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\Z')
 _PREPAID_DEFAULT_DECIMAL_PLACES = 2
@@ -44,13 +44,13 @@ _PREPAID_DEFAULT_DECIMAL_PLACES = 2
 truststore.inject_into_ssl()
 
 
-def read_access_token() -> str | None:
-    """Read the current access token from the Claude credentials file."""
-    if not CLAUDE_CREDENTIALS.exists():
+def read_access_token(account: Account) -> str | None:
+    """Read the current access token from *account*'s credentials file."""
+    if not account.credentials_path.exists():
         return None
 
     try:
-        creds = json.loads(CLAUDE_CREDENTIALS.read_text())
+        creds = json.loads(account.credentials_path.read_text())
         oauth = creds.get('claudeAiOauth') if isinstance(creds, dict) else None
         return oauth.get('accessToken') or None if isinstance(oauth, dict) else None
     except (OSError, ValueError):
@@ -60,9 +60,9 @@ def read_access_token() -> str | None:
         return None
 
 
-def api_headers() -> dict[str, str] | None:
-    """Return auth headers for the Anthropic OAuth API, or None."""
-    token = read_access_token()
+def api_headers(account: Account) -> dict[str, str] | None:
+    """Return auth headers for the Anthropic OAuth API for *account*, or None."""
+    token = read_access_token(account)
     if not token:
         return None
 
@@ -74,9 +74,9 @@ def api_headers() -> dict[str, str] | None:
     }
 
 
-def fetch_usage() -> dict[str, Any]:
-    """Fetch usage data from the Anthropic OAuth usage API."""
-    headers = api_headers()
+def fetch_usage(account: Account) -> dict[str, Any]:
+    """Fetch usage data for *account* from the Anthropic OAuth usage API."""
+    headers = api_headers(account)
     if not headers:
         return {'error': T['no_token']}
 
@@ -109,9 +109,9 @@ def fetch_usage() -> dict[str, Any]:
         return {'error': T['connection_error']}
 
 
-def fetch_profile() -> dict[str, Any] | None:
-    """Fetch account profile from the Anthropic OAuth profile API."""
-    headers = api_headers()
+def fetch_profile(account: Account) -> dict[str, Any] | None:
+    """Fetch *account*'s profile from the Anthropic OAuth profile API."""
+    headers = api_headers(account)
     if not headers:
         return None
 
@@ -123,7 +123,7 @@ def fetch_profile() -> dict[str, Any] | None:
         return None
 
 
-def fetch_prepaid_credits(org_uuid: Any) -> dict[str, Any] | None:
+def fetch_prepaid_credits(account: Account, org_uuid: Any) -> dict[str, Any] | None:
     """Fetch the prepaid usage-credit balance of an organization.
 
     Supplementary data: every failure - a malformed organization uuid, a
@@ -133,6 +133,8 @@ def fetch_prepaid_credits(org_uuid: Any) -> dict[str, Any] | None:
 
     Parameters
     ----------
+    account : Account
+        Account whose credentials authorize the request.
     org_uuid : Any
         Organization uuid from the profile response.  Anything that is not
         a canonical uuid is rejected before a request is sent.
@@ -146,7 +148,7 @@ def fetch_prepaid_credits(org_uuid: Any) -> dict[str, Any] | None:
     if not isinstance(org_uuid, str) or not _ORG_UUID_PATTERN.match(org_uuid):
         return None
 
-    headers = api_headers()
+    headers = api_headers(account)
     if not headers:
         return None
 

@@ -40,7 +40,7 @@ class TestSharedMemoryRoundTrip(unittest.TestCase):
 
     def setUp(self):
         _reset_globals()
-        self._isolated_names = patch(f'{MODULE}.config_dir_suffix', return_value=f'_test{os.getpid()}')
+        self._isolated_names = patch(f'{MODULE}.launch_suffix', return_value=f'_test{os.getpid()}')
         self._isolated_names.start()
 
     def tearDown(self):
@@ -401,7 +401,7 @@ class TestObjectNames(unittest.TestCase):
         """Default config dir keeps the unsuffixed names for cross-version detection."""
         import usage_monitor_for_claude.platforms.instance_win32 as si
 
-        with patch(f'{MODULE}.config_dir_suffix', return_value=''):
+        with patch(f'{MODULE}.launch_suffix', return_value=''):
             mutex_name, mapping_name = si._object_names()
 
         self.assertEqual(mutex_name, 'UsageMonitorForClaude_SingleInstance')
@@ -411,7 +411,7 @@ class TestObjectNames(unittest.TestCase):
         """A custom config dir yields suffixed, per-instance names."""
         import usage_monitor_for_claude.platforms.instance_win32 as si
 
-        with patch(f'{MODULE}.config_dir_suffix', return_value='_abc123def456'):
+        with patch(f'{MODULE}.launch_suffix', return_value='_abc123def456'):
             mutex_name, mapping_name = si._object_names()
 
         self.assertEqual(mutex_name, 'UsageMonitorForClaude_SingleInstance_abc123def456')

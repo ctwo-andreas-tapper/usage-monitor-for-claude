@@ -5,6 +5,7 @@ let textTimerId = null;
 let popupPinned = false;
 let compactHide = [];
 let lastData = null;
+let accountsById = {};
 
 /**
  * Set CSS custom properties for theme colors and inject translation strings.
@@ -23,9 +24,6 @@ function init(config) {
     translations = config.t;
     compactHide = config.compact_hide || [];
     document.getElementById('title').textContent = translations.title;
-    document.getElementById('headingAccount').textContent = translations.account;
-    document.getElementById('labelEmail').textContent = translations.email;
-    document.getElementById('labelPlan').textContent = translations.plan;
     document.getElementById('headingUsage').textContent = translations.usage;
     document.getElementById('headingExtraUsage').textContent = translations.extra_usage;
     document.getElementById('headingClaudeCode').textContent = translations.claude_code;
@@ -41,19 +39,13 @@ function init(config) {
 
     els = {
         accountSection: document.getElementById('accountSection'),
-        emailRow: document.getElementById('emailRow'),
-        emailValue: document.getElementById('emailValue'),
-        planRow: document.getElementById('planRow'),
-        planValue: document.getElementById('planValue'),
+        headingAccount: document.getElementById('headingAccount'),
+        accountRows: document.getElementById('accountRows'),
         usageSection: document.getElementById('usageSection'),
         headingUsage: document.getElementById('headingUsage'),
         usageBars: document.getElementById('usageBars'),
         extraSection: document.getElementById('extraSection'),
-        extraSpent: document.getElementById('extraSpent'),
-        extraPct: document.getElementById('extraPct'),
-        extraBarContainer: document.getElementById('extraBarContainer'),
-        extraFill: document.getElementById('extraFill'),
-        extraBalance: document.getElementById('extraBalance'),
+        extraRows: document.getElementById('extraRows'),
         installSection: document.getElementById('installSection'),
         installRows: document.getElementById('installRows'),
         statusSection: document.getElementById('statusSection'),
@@ -156,43 +148,64 @@ function setupPinnedDrag() {
     });
 }
 
+function barKey(entry) { return `${entry.key}:${entry.account_index}`; }
+
+function badge(index) {
+    const span = document.createElement('span');
+    span.className = 'badge';
+    span.textContent = String(index + 1);
+    return span;
+}
+
+function updateAccounts(accounts, multi) {
+    els.headingAccount.textContent = multi ? translations.accounts : translations.account;
+    els.accountRows.replaceChildren(...accounts.map((account) => {
+        const row = document.createElement('div');
+        row.className = 'account-row';
+        const name = document.createElement('span');
+        name.className = 'account-name';
+        if (multi) name.appendChild(badge(account.index));
+        const text = document.createElement('span');
+        text.textContent = account.email || account.label;
+        name.appendChild(text);
+        const plan = document.createElement('span');
+        plan.className = 'account-plan';
+        plan.textContent = account.plan || '';
+        row.append(name, plan);
+        if (account.error) {
+            const error = document.createElement('div');
+            error.className = 'account-error';
+            error.textContent = account.error;
+            row.appendChild(error);
+        }
+        return row;
+    }));
+}
+
 /**
  * Update all popup sections with fresh data from Python.
  *
- * @param {object} data - Pre-formatted snapshot from _snapshot_to_dict().
+ * @param {object} data - Pre-formatted payload from _popup_data().
  */
 function updateData(data) {
     lastData = data;
+    const accounts = data.accounts || [];
+    const multi = accounts.length > 1;
+    accountsById = Object.fromEntries(accounts.map((account) => [account.index, account]));
 
-    const hasProfile = !!data.profile;
-    const accountVisible = hasProfile && !compactHidden('account');
+    const accountVisible = accounts.length > 0 && !compactHidden('account');
     els.accountSection.classList.toggle('visible', accountVisible);
-    if (hasProfile) {
-        els.emailValue.textContent = data.profile.email;
-        els.emailRow.style.display = data.profile.email ? '' : 'none';
-        els.planValue.textContent = data.profile.plan;
-        els.planRow.style.display = data.profile.plan ? '' : 'none';
-    }
+    if (accountVisible) updateAccounts(accounts, multi);
 
-    const usage = (data.usage || []).filter((entry) => !compactHidden(entry.key));
-    const hasUsage = !!usage.length;
+    const groups = (data.usage_groups || []).filter((group) => !compactHidden(group.key));
+    const hasUsage = !!groups.length;
     els.usageSection.classList.toggle('visible', hasUsage);
-    if (hasUsage) {
-        updateUsageBars(usage);
-    }
+    if (hasUsage) updateUsageGroups(groups, multi);
 
-    const hasExtra = !!data.extra;
-    const extraVisible = hasExtra && !compactHidden('extra_usage');
+    const extra = data.extra || [];
+    const extraVisible = !!extra.length && !compactHidden('extra_usage');
     els.extraSection.classList.toggle('visible', extraVisible);
-    if (hasExtra) {
-        els.extraSpent.textContent = data.extra.spent_text;
-        els.extraPct.style.display = data.extra.has_limit ? '' : 'none';
-        els.extraPct.textContent = data.extra.pct_text;
-        els.extraBarContainer.style.display = data.extra.has_limit ? '' : 'none';
-        els.extraFill.style.width = `${data.extra.fill_pct * 100}%`;
-        els.extraBalance.textContent = data.extra.balance_text || '';
-        els.extraBalance.style.display = data.extra.balance_text ? '' : 'none';
-    }
+    if (extraVisible) updateExtra(extra, multi);
 
     const hasInstalls = !!data.installations?.length;
     const installsVisible = hasInstalls && !compactHidden('claude_code');
@@ -329,42 +342,60 @@ function formatCountdown(totalSeconds) {
     return translations.duration_m.replace('{m}', totalMin);
 }
 
-function updateUsageBars(entries) {
-    // Rebuild whenever the field set changes, not only the count - after an
-    // account switch the same number of bars can carry different quotas, and
-    // an in-place update would show the new values under the old labels.
-    const bars = els.usageBars.children;
-    const sameFields = entries.length === bars.length
-        && entries.every((entry, i) => bars[i].dataset.key === entry.key);
-
-    if (!sameFields) {
-        els.usageBars.replaceChildren(...entries.map(createBarElement));
-        requestAnimationFrame(() => {
-            for (let i = 0; i < entries.length; i++) {
-                els.usageBars.children[i].querySelector('.bar-fill').style.width =
-                    `${entries[i].fill_pct * 100}%`;
+function updateUsageGroups(groups, multi) {
+    // Rebuild the group scaffold only when the set of quota models changes;
+    // otherwise the per-account bars inside each group update in place.
+    const existing = els.usageBars.children;
+    const sameGroups = groups.length === existing.length && groups.every((group, i) => existing[i].dataset.key === group.key);
+    if (!sameGroups) {
+        els.usageBars.replaceChildren(...groups.map((group) => {
+            const div = document.createElement('div');
+            div.className = 'usage-group';
+            div.dataset.key = group.key;
+            if (multi) {
+                const label = document.createElement('div');
+                label.className = 'group-label';
+                label.textContent = group.label;
+                div.appendChild(label);
             }
-        });
-    } else {
-        for (let i = 0; i < entries.length; i++) {
-            updateBarElement(els.usageBars.children[i], entries[i]);
-        }
+            const bars = document.createElement('div');
+            bars.className = 'group-bars';
+            div.appendChild(bars);
+            return div;
+        }));
+    }
+    for (let i = 0; i < groups.length; i++) {
+        renderBars(els.usageBars.children[i].querySelector('.group-bars'), groups[i].bars, multi);
     }
 }
 
-function createBarElement(entry) {
+function renderBars(container, entries, multi) {
+    // Rebuild whenever the (field, account) set changes, not only the count -
+    // after an account switch the same number of bars can carry different
+    // quotas, and an in-place update would show the new values under the old
+    // labels.
+    const bars = container.children;
+    const sameFields = entries.length === bars.length && entries.every((entry, i) => bars[i].dataset.key === barKey(entry));
+    if (!sameFields) {
+        container.replaceChildren(...entries.map((entry) => createBarElement(entry, multi)));
+        requestAnimationFrame(() => {
+            for (let i = 0; i < entries.length; i++) {
+                container.children[i].querySelector('.bar-fill').style.width = `${entries[i].fill_pct * 100}%`;
+            }
+        });
+    } else {
+        for (let i = 0; i < entries.length; i++) updateBarElement(container.children[i], entries[i]);
+    }
+}
+
+function createBarElement(entry, multi) {
     const div = document.createElement('div');
     div.className = 'usage-entry';
-    div.dataset.key = entry.key;
+    div.dataset.key = barKey(entry);
 
-    const header = document.createElement('div');
-    header.className = 'bar-header';
-    const label = document.createElement('span');
-    label.textContent = entry.label;
     const pct = document.createElement('span');
     pct.className = 'bar-pct';
     pct.textContent = entry.pct_text;
-    header.append(label, pct);
 
     const container = document.createElement('div');
     container.className = 'bar-container';
@@ -388,7 +419,23 @@ function createBarElement(entry) {
         container.appendChild(marker);
     }
 
-    div.append(header, container);
+    if (multi) {
+        // The account is identified by a badge in front of the bar; its name
+        // lives once in the ACCOUNTS list and the quota name in the group
+        // heading, so neither is repeated on the bar.
+        const row = document.createElement('div');
+        row.className = 'bar-row';
+        row.append(badge(entry.account_index), container, pct);
+        div.appendChild(row);
+    } else {
+        const header = document.createElement('div');
+        header.className = 'bar-header';
+        const label = document.createElement('span');
+        label.className = 'bar-label';
+        label.textContent = entry.label;
+        header.append(label, pct);
+        div.append(header, container);
+    }
 
     if (entry.reset_text) {
         const reset = document.createElement('div');
@@ -439,6 +486,72 @@ function updateBarElement(div, entry) {
     } else if (resetEl) {
         resetEl.remove();
     }
+}
+
+function updateExtra(entries, multi) {
+    // The count changes only when an account gains or loses extra usage, which
+    // is rare; each entry then rebuilds, otherwise the row updates in place.
+    // A change in badge visibility (single <-> multi) also forces a rebuild,
+    // since the in-place path never touches the account badge.
+    const rows = els.extraRows.children;
+    const badgeMismatch = rows.length > 0 && multi !== !!rows[0].querySelector('.badge');
+    if (entries.length !== rows.length || badgeMismatch) {
+        els.extraRows.replaceChildren(...entries.map((entry) => createExtraElement(entry, multi)));
+    } else {
+        for (let i = 0; i < entries.length; i++) updateExtraElement(rows[i], entries[i]);
+    }
+}
+
+function createExtraElement(entry, multi) {
+    const div = document.createElement('div');
+    div.className = 'usage-entry';
+
+    const header = document.createElement('div');
+    header.className = 'bar-header';
+    const spent = document.createElement('span');
+    spent.className = 'extra-spent';
+    if (multi) spent.appendChild(badge(entry.account_index));
+    const spentValue = document.createElement('span');
+    spentValue.className = 'extra-spent-value';
+    spentValue.textContent = entry.spent_text;
+    spent.appendChild(spentValue);
+    const pct = document.createElement('span');
+    pct.className = 'bar-pct';
+    pct.textContent = entry.pct_text;
+    pct.style.display = entry.has_limit ? '' : 'none';
+    header.append(spent, pct);
+
+    const container = document.createElement('div');
+    container.className = 'bar-container';
+    container.style.display = entry.has_limit ? '' : 'none';
+    const fill = document.createElement('div');
+    fill.className = 'bar-fill';
+    fill.style.width = `${entry.fill_pct * 100}%`;
+    container.appendChild(fill);
+
+    const balance = document.createElement('span');
+    balance.className = 'extra-balance';
+    balance.textContent = entry.balance_text || '';
+    balance.style.display = entry.balance_text ? '' : 'none';
+
+    div.append(header, container, balance);
+    return div;
+}
+
+function updateExtraElement(div, entry) {
+    div.querySelector('.extra-spent-value').textContent = entry.spent_text;
+
+    const pct = div.querySelector('.bar-pct');
+    pct.textContent = entry.pct_text;
+    pct.style.display = entry.has_limit ? '' : 'none';
+
+    const container = div.querySelector('.bar-container');
+    container.style.display = entry.has_limit ? '' : 'none';
+    container.querySelector('.bar-fill').style.width = `${entry.fill_pct * 100}%`;
+
+    const balance = div.querySelector('.extra-balance');
+    balance.textContent = entry.balance_text || '';
+    balance.style.display = entry.balance_text ? '' : 'none';
 }
 
 // Report content height changes to the host (pywebview or dev.html iframe parent).

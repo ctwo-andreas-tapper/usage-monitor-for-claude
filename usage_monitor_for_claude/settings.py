@@ -6,11 +6,10 @@ Centralizes all user-tunable constants.  Structural constants (API URLs,
 registry keys, file paths) remain in their respective modules.
 
 Loads an optional ``usage-monitor-settings.json`` to let users override
-any constant.  Search order:
+any constant.  One file serves every monitored account.  Search order:
 
-1. ``$CLAUDE_CONFIG_DIR/usage-monitor-settings.json`` (if set and different from ``~/.claude/``)
-2. Next to the executable (frozen) or project root (source)
-3. ``~/.claude/usage-monitor-settings.json``
+1. Next to the executable (frozen) or project root (source)
+2. ``~/.claude/usage-monitor-settings.json``
 
 The app never creates this file - users place it manually.
 """
@@ -21,7 +20,6 @@ import locale as _locale
 import sys
 from pathlib import Path
 
-from .instance_id import effective_config_dir, is_default_config_dir
 from .platforms import show_warning_box, system_time_format
 
 __all__ = [
@@ -88,13 +86,7 @@ def _load_settings() -> dict:
 
     home_claude = Path.home() / '.claude'
 
-    # A custom config dir takes precedence over the exe-adjacent file so
-    # each instance (one per Claude account) can have its own settings.
-    search_paths = []
-    if not is_default_config_dir():
-        search_paths.append(effective_config_dir() / SETTINGS_FILENAME)
-    search_paths.append(app_dir / SETTINGS_FILENAME)
-    search_paths.append(home_claude / SETTINGS_FILENAME)
+    search_paths = [app_dir / SETTINGS_FILENAME, home_claude / SETTINGS_FILENAME]
 
     for path in search_paths:
         if path.is_file():

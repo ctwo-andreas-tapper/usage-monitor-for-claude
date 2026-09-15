@@ -224,6 +224,9 @@ class TestLocaleConsistency(unittest.TestCase):
     def test_at_least_two_locale_files_exist(self):
         self.assertGreaterEqual(len(self.locale_files), 2)
 
+    def test_accounts_heading_present(self):
+        self.assertIn('accounts', self.reference)
+
     def test_all_files_have_same_keys_as_english(self):
         """Every locale file must have exactly the same keys as en.json."""
         ref_keys = set(self.reference.keys())

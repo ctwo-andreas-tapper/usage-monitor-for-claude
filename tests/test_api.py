@@ -13,6 +13,7 @@ from tempfile import TemporaryDirectory
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from usage_monitor_for_claude.account import Account
 from usage_monitor_for_claude.api import (
     API_URL_USAGE, _extract_server_message, _merge_scoped_limits, _model_slug, _normalize_prepaid_credits, _parse_retry_after,
     fetch_prepaid_credits, fetch_usage, read_access_token,
@@ -21,52 +22,12 @@ from usage_monitor_for_claude.i18n import LOCALE_DIR
 
 EN = json.loads((LOCALE_DIR / 'en.json').read_text(encoding='utf-8'))
 
+_ANY_ACCOUNT = Account(Path('/nonexistent/claude'), 'any')
 
-# ---------------------------------------------------------------------------
-# CLAUDE_CONFIG_DIR
-# ---------------------------------------------------------------------------
 
-class TestClaudeConfigDir(unittest.TestCase):
-    """Tests for CLAUDE_CONFIG_DIR resolution."""
-
-    def test_default_uses_home_claude(self):
-        """Without CLAUDE_CONFIG_DIR env var, defaults to ~/.claude/."""
-        with patch.dict('os.environ', {}, clear=False):
-            # Remove CLAUDE_CONFIG_DIR if it happens to be set
-            env = {k: v for k, v in __import__('os').environ.items() if k != 'CLAUDE_CONFIG_DIR'}
-            with patch.dict('os.environ', env, clear=True):
-                import importlib
-                import usage_monitor_for_claude.api as api_mod
-                importlib.reload(api_mod)
-                try:
-                    self.assertEqual(api_mod.CLAUDE_CONFIG_DIR, Path.home() / '.claude')
-                    self.assertEqual(api_mod.CLAUDE_CREDENTIALS, Path.home() / '.claude' / '.credentials.json')
-                finally:
-                    importlib.reload(api_mod)
-
-    def test_custom_config_dir(self):
-        """CLAUDE_CONFIG_DIR env var overrides the default path."""
-        with TemporaryDirectory() as tmp:
-            with patch.dict('os.environ', {'CLAUDE_CONFIG_DIR': tmp}):
-                import importlib
-                import usage_monitor_for_claude.api as api_mod
-                importlib.reload(api_mod)
-                try:
-                    self.assertEqual(api_mod.CLAUDE_CONFIG_DIR, Path(tmp))
-                    self.assertEqual(api_mod.CLAUDE_CREDENTIALS, Path(tmp) / '.credentials.json')
-                finally:
-                    importlib.reload(api_mod)
-
-    def test_empty_config_dir_uses_default(self):
-        """Empty CLAUDE_CONFIG_DIR env var falls back to default."""
-        with patch.dict('os.environ', {'CLAUDE_CONFIG_DIR': ''}):
-            import importlib
-            import usage_monitor_for_claude.api as api_mod
-            importlib.reload(api_mod)
-            try:
-                self.assertEqual(api_mod.CLAUDE_CONFIG_DIR, Path.home() / '.claude')
-            finally:
-                importlib.reload(api_mod)
+def _account(tmp: str) -> Account:
+    """Return an Account whose credentials file lives in *tmp*."""
+    return Account(Path(tmp), 'test')
 
 
 # ---------------------------------------------------------------------------
@@ -79,86 +40,70 @@ class TestReadAccessToken(unittest.TestCase):
     def test_file_missing(self):
         """Missing credentials file returns None."""
         with TemporaryDirectory() as tmp:
-            fake_path = Path(tmp) / 'nonexistent.json'
-            with patch('usage_monitor_for_claude.api.CLAUDE_CREDENTIALS', fake_path):
-                self.assertIsNone(read_access_token())
+            self.assertIsNone(read_access_token(_account(tmp)))
 
     def test_valid_token(self):
         """Extracts token from well-formed credentials file."""
-        creds = {'claudeAiOauth': {'accessToken': 'sk-test-123'}}
         with TemporaryDirectory() as tmp:
-            creds_file = Path(tmp) / 'creds.json'
-            creds_file.write_text(json.dumps(creds))
-            with patch('usage_monitor_for_claude.api.CLAUDE_CREDENTIALS', creds_file):
-                self.assertEqual(read_access_token(), 'sk-test-123')
+            (Path(tmp) / '.credentials.json').write_text(json.dumps({'claudeAiOauth': {'accessToken': 'sk-test-123'}}))
+            self.assertEqual(read_access_token(_account(tmp)), 'sk-test-123')
+
+    def test_reads_the_account_credentials_path(self):
+        """The token is read from the account's own credentials file, not any other directory."""
+        with TemporaryDirectory() as own, TemporaryDirectory() as other:
+            (Path(own) / '.credentials.json').write_text(json.dumps({'claudeAiOauth': {'accessToken': 'own-tok'}}))
+            (Path(other) / '.credentials.json').write_text(json.dumps({'claudeAiOauth': {'accessToken': 'other-tok'}}))
+            self.assertEqual(read_access_token(_account(own)), 'own-tok')
 
     def test_malformed_json(self):
         """Malformed JSON returns None."""
         with TemporaryDirectory() as tmp:
-            creds_file = Path(tmp) / 'creds.json'
-            creds_file.write_text('not json')
-            with patch('usage_monitor_for_claude.api.CLAUDE_CREDENTIALS', creds_file):
-                self.assertIsNone(read_access_token())
+            (Path(tmp) / '.credentials.json').write_text('not json')
+            self.assertIsNone(read_access_token(_account(tmp)))
 
     def test_missing_oauth_key(self):
         """Missing claudeAiOauth key returns None."""
         with TemporaryDirectory() as tmp:
-            creds_file = Path(tmp) / 'creds.json'
-            creds_file.write_text('{"otherKey": {}}')
-            with patch('usage_monitor_for_claude.api.CLAUDE_CREDENTIALS', creds_file):
-                self.assertIsNone(read_access_token())
+            (Path(tmp) / '.credentials.json').write_text('{"otherKey": {}}')
+            self.assertIsNone(read_access_token(_account(tmp)))
 
     def test_missing_access_token_key(self):
         """Missing accessToken key returns None."""
-        creds = {'claudeAiOauth': {'refreshToken': 'rt-123'}}
         with TemporaryDirectory() as tmp:
-            creds_file = Path(tmp) / 'creds.json'
-            creds_file.write_text(json.dumps(creds))
-            with patch('usage_monitor_for_claude.api.CLAUDE_CREDENTIALS', creds_file):
-                self.assertIsNone(read_access_token())
+            (Path(tmp) / '.credentials.json').write_text(json.dumps({'claudeAiOauth': {'refreshToken': 'rt-123'}}))
+            self.assertIsNone(read_access_token(_account(tmp)))
 
     def test_empty_token_string(self):
         """Empty token string returns None (falsy check)."""
-        creds = {'claudeAiOauth': {'accessToken': ''}}
         with TemporaryDirectory() as tmp:
-            creds_file = Path(tmp) / 'creds.json'
-            creds_file.write_text(json.dumps(creds))
-            with patch('usage_monitor_for_claude.api.CLAUDE_CREDENTIALS', creds_file):
-                self.assertIsNone(read_access_token())
+            (Path(tmp) / '.credentials.json').write_text(json.dumps({'claudeAiOauth': {'accessToken': ''}}))
+            self.assertIsNone(read_access_token(_account(tmp)))
 
     def test_read_error_returns_none(self):
         """An OS-level read failure (e.g. a read racing a concurrent write) returns None instead of raising."""
         with TemporaryDirectory() as tmp:
-            creds_file = Path(tmp) / 'creds.json'
-            creds_file.write_text('{"claudeAiOauth": {"accessToken": "sk-test-123"}}')
-            with patch('usage_monitor_for_claude.api.CLAUDE_CREDENTIALS', creds_file), \
-                 patch.object(Path, 'read_text', side_effect=PermissionError('locked')):
-                self.assertIsNone(read_access_token())
+            (Path(tmp) / '.credentials.json').write_text('{"claudeAiOauth": {"accessToken": "sk-test-123"}}')
+            with patch.object(Path, 'read_text', side_effect=PermissionError('locked')):
+                self.assertIsNone(read_access_token(_account(tmp)))
 
     def test_null_oauth_value_returns_none(self):
         """A claudeAiOauth key holding JSON null (e.g. after a logout) returns None instead of raising."""
         with TemporaryDirectory() as tmp:
-            creds_file = Path(tmp) / 'creds.json'
-            creds_file.write_text('{"claudeAiOauth": null}')
-            with patch('usage_monitor_for_claude.api.CLAUDE_CREDENTIALS', creds_file):
-                self.assertIsNone(read_access_token())
+            (Path(tmp) / '.credentials.json').write_text('{"claudeAiOauth": null}')
+            self.assertIsNone(read_access_token(_account(tmp)))
 
     def test_non_object_top_level_returns_none(self):
         """Valid JSON with a non-object top level (list, string, number) returns None instead of raising."""
         for content in ('[]', '"token"', '42', 'null'):
             with self.subTest(content=content), TemporaryDirectory() as tmp:
-                creds_file = Path(tmp) / 'creds.json'
-                creds_file.write_text(content)
-                with patch('usage_monitor_for_claude.api.CLAUDE_CREDENTIALS', creds_file):
-                    self.assertIsNone(read_access_token())
+                (Path(tmp) / '.credentials.json').write_text(content)
+                self.assertIsNone(read_access_token(_account(tmp)))
 
     def test_non_dict_oauth_value_returns_none(self):
         """A claudeAiOauth key holding a non-object value returns None instead of raising."""
         with TemporaryDirectory() as tmp:
-            creds_file = Path(tmp) / 'creds.json'
-            creds_file.write_text('{"claudeAiOauth": "sk-test-123"}')
-            with patch('usage_monitor_for_claude.api.CLAUDE_CREDENTIALS', creds_file):
-                self.assertIsNone(read_access_token())
+            (Path(tmp) / '.credentials.json').write_text('{"claudeAiOauth": "sk-test-123"}')
+            self.assertIsNone(read_access_token(_account(tmp)))
 
 
 # ---------------------------------------------------------------------------
@@ -172,7 +117,7 @@ class TestFetchUsage(unittest.TestCase):
     @patch('usage_monitor_for_claude.api.api_headers', return_value=None)
     def test_no_token_returns_error(self, _mock_headers):
         """Missing token returns no_token error."""
-        result = fetch_usage()
+        result = fetch_usage(_ANY_ACCOUNT)
         self.assertEqual(result, {'error': EN['no_token']})
 
     @patch('usage_monitor_for_claude.api.requests.get')
@@ -183,7 +128,7 @@ class TestFetchUsage(unittest.TestCase):
         mock_resp.json.return_value = {'five_hour': {'utilization': 42.0}}
         mock_get.return_value = mock_resp
 
-        result = fetch_usage()
+        result = fetch_usage(_ANY_ACCOUNT)
 
         self.assertEqual(result, {'five_hour': {'utilization': 42.0}})
         mock_get.assert_called_once_with(API_URL_USAGE, headers={'Authorization': 'Bearer test'}, timeout=10)
@@ -195,7 +140,7 @@ class TestFetchUsage(unittest.TestCase):
         import requests
         mock_get.side_effect = requests.ConnectionError()
 
-        result = fetch_usage()
+        result = fetch_usage(_ANY_ACCOUNT)
 
         self.assertEqual(result, {'error': EN['connection_error']})
 
@@ -206,7 +151,7 @@ class TestFetchUsage(unittest.TestCase):
         import requests
         mock_get.side_effect = requests.exceptions.SSLError()
 
-        result = fetch_usage()
+        result = fetch_usage(_ANY_ACCOUNT)
 
         self.assertEqual(result, {'error': EN['certificate_error']})
 
@@ -221,7 +166,7 @@ class TestFetchUsage(unittest.TestCase):
         mock_resp.raise_for_status.side_effect = requests.HTTPError(response=mock_resp)
         mock_get.return_value = mock_resp
 
-        result = fetch_usage()
+        result = fetch_usage(_ANY_ACCOUNT)
 
         self.assertEqual(result['error'], EN['auth_expired'])
         self.assertTrue(result['auth_error'])
@@ -237,7 +182,7 @@ class TestFetchUsage(unittest.TestCase):
         mock_resp.raise_for_status.side_effect = requests.HTTPError(response=mock_resp)
         mock_get.return_value = mock_resp
 
-        result = fetch_usage()
+        result = fetch_usage(_ANY_ACCOUNT)
 
         self.assertEqual(result, {'error': EN['server_error'].format(code=500)})
 
@@ -252,7 +197,7 @@ class TestFetchUsage(unittest.TestCase):
         mock_resp.raise_for_status.side_effect = requests.HTTPError(response=mock_resp)
         mock_get.return_value = mock_resp
 
-        result = fetch_usage()
+        result = fetch_usage(_ANY_ACCOUNT)
 
         self.assertEqual(result, {'error': EN['server_error'].format(code=503)})
 
@@ -267,7 +212,7 @@ class TestFetchUsage(unittest.TestCase):
         mock_resp.raise_for_status.side_effect = requests.HTTPError(response=mock_resp)
         mock_get.return_value = mock_resp
 
-        result = fetch_usage()
+        result = fetch_usage(_ANY_ACCOUNT)
 
         self.assertEqual(result, {'error': EN['http_error'].format(code=403)})
 
@@ -278,7 +223,7 @@ class TestFetchUsage(unittest.TestCase):
         import requests
         mock_get.side_effect = requests.HTTPError(response=None)
 
-        result = fetch_usage()
+        result = fetch_usage(_ANY_ACCOUNT)
 
         self.assertEqual(result, {'error': EN['http_error'].format(code='?')})
         self.assertNotIn('auth_error', result)
@@ -289,7 +234,7 @@ class TestFetchUsage(unittest.TestCase):
         """Unexpected exception returns connection_error message."""
         mock_get.side_effect = RuntimeError('unexpected')
 
-        result = fetch_usage()
+        result = fetch_usage(_ANY_ACCOUNT)
 
         self.assertEqual(result, {'error': EN['connection_error']})
 
@@ -301,10 +246,18 @@ class TestFetchUsage(unittest.TestCase):
         mock_resp.json.return_value = {}
         mock_get.return_value = mock_resp
 
-        fetch_usage()
+        fetch_usage(_ANY_ACCOUNT)
 
         called_url = mock_get.call_args[0][0]
         self.assertEqual(called_url, 'https://api.anthropic.com/api/oauth/usage')
+
+    @patch('usage_monitor_for_claude.api.requests.get')
+    @patch('usage_monitor_for_claude.api.api_headers', return_value={'Authorization': 'Bearer test'})
+    def test_headers_are_read_for_the_given_account(self, mock_headers, mock_get):
+        """The headers are built for exactly the account passed in."""
+        mock_get.return_value = MagicMock(status_code=200, json=lambda: {'five_hour': {'utilization': 1, 'resets_at': None}})
+        fetch_usage(_ANY_ACCOUNT)
+        mock_headers.assert_called_once_with(_ANY_ACCOUNT)
 
 
 # ---------------------------------------------------------------------------
@@ -313,7 +266,7 @@ class TestFetchUsage(unittest.TestCase):
 
 @patch('usage_monitor_for_claude.api.T', EN)
 class TestFetchUsageRateLimit(unittest.TestCase):
-    """Tests for HTTP 429 rate-limit handling in fetch_usage()."""
+    """Tests for HTTP 429 rate-limit handling in fetch_usage(_ANY_ACCOUNT)."""
 
     @patch('usage_monitor_for_claude.api.requests.get')
     @patch('usage_monitor_for_claude.api.api_headers', return_value={'Authorization': 'Bearer test'})
@@ -327,7 +280,7 @@ class TestFetchUsageRateLimit(unittest.TestCase):
         mock_resp.raise_for_status.side_effect = requests.HTTPError(response=mock_resp)
         mock_get.return_value = mock_resp
 
-        result = fetch_usage()
+        result = fetch_usage(_ANY_ACCOUNT)
 
         self.assertTrue(result['rate_limited'])
         self.assertEqual(result['error'], EN['http_error'].format(code=429))
@@ -344,7 +297,7 @@ class TestFetchUsageRateLimit(unittest.TestCase):
         mock_resp.raise_for_status.side_effect = requests.HTTPError(response=mock_resp)
         mock_get.return_value = mock_resp
 
-        result = fetch_usage()
+        result = fetch_usage(_ANY_ACCOUNT)
 
         self.assertEqual(result['retry_after'], 60)
         self.assertTrue(result['rate_limited'])
@@ -361,7 +314,7 @@ class TestFetchUsageRateLimit(unittest.TestCase):
         mock_resp.raise_for_status.side_effect = requests.HTTPError(response=mock_resp)
         mock_get.return_value = mock_resp
 
-        result = fetch_usage()
+        result = fetch_usage(_ANY_ACCOUNT)
 
         self.assertEqual(result['server_message'], 'Rate limited.')
 
@@ -377,7 +330,7 @@ class TestFetchUsageRateLimit(unittest.TestCase):
         mock_resp.raise_for_status.side_effect = requests.HTTPError(response=mock_resp)
         mock_get.return_value = mock_resp
 
-        result = fetch_usage()
+        result = fetch_usage(_ANY_ACCOUNT)
 
         self.assertNotIn('retry_after', result)
 
@@ -392,7 +345,7 @@ class TestFetchUsageRateLimit(unittest.TestCase):
         mock_resp.raise_for_status.side_effect = requests.HTTPError(response=mock_resp)
         mock_get.return_value = mock_resp
 
-        result = fetch_usage()
+        result = fetch_usage(_ANY_ACCOUNT)
 
         self.assertEqual(result['server_message'], 'Internal server error')
 
@@ -443,7 +396,7 @@ class TestFetchPrepaidCredits(unittest.TestCase):
         mock_resp.json.return_value = _prepaid_response()
         mock_get.return_value = mock_resp
 
-        result = fetch_prepaid_credits(_ORG_UUID)
+        result = fetch_prepaid_credits(_ANY_ACCOUNT, _ORG_UUID)
 
         self.assertEqual(result, {'amount_minor': 5597.0, 'currency': 'EUR', 'decimal_places': 2})
 
@@ -455,7 +408,7 @@ class TestFetchPrepaidCredits(unittest.TestCase):
         mock_resp.json.return_value = _prepaid_response()
         mock_get.return_value = mock_resp
 
-        fetch_prepaid_credits(_ORG_UUID)
+        fetch_prepaid_credits(_ANY_ACCOUNT, _ORG_UUID)
 
         mock_get.assert_called_once_with(
             f'https://api.anthropic.com/api/oauth/organizations/{_ORG_UUID}/prepaid/credits',
@@ -471,7 +424,7 @@ class TestFetchPrepaidCredits(unittest.TestCase):
         mock_resp.json.return_value = _prepaid_response(tranches=[], promo_tranches=[])
         mock_get.return_value = mock_resp
 
-        self.assertEqual(fetch_prepaid_credits(_ORG_UUID), {'amount_minor': 5597.0, 'currency': 'EUR', 'decimal_places': 2})
+        self.assertEqual(fetch_prepaid_credits(_ANY_ACCOUNT, _ORG_UUID), {'amount_minor': 5597.0, 'currency': 'EUR', 'decimal_places': 2})
 
     @patch('usage_monitor_for_claude.api.requests.get')
     @patch('usage_monitor_for_claude.api.api_headers', return_value={'Authorization': 'Bearer test'})
@@ -485,7 +438,7 @@ class TestFetchPrepaidCredits(unittest.TestCase):
         mock_resp.json.return_value = _prepaid_response(promo_tranches=[tranche])
         mock_get.return_value = mock_resp
 
-        self.assertEqual(fetch_prepaid_credits(_ORG_UUID), {'amount_minor': 5597.0, 'currency': 'EUR', 'decimal_places': 2})
+        self.assertEqual(fetch_prepaid_credits(_ANY_ACCOUNT, _ORG_UUID), {'amount_minor': 5597.0, 'currency': 'EUR', 'decimal_places': 2})
 
     @patch('usage_monitor_for_claude.api.requests.get')
     @patch('usage_monitor_for_claude.api.api_headers', return_value={'Authorization': 'Bearer test'})
@@ -495,7 +448,7 @@ class TestFetchPrepaidCredits(unittest.TestCase):
         mock_resp.json.return_value = _prepaid_response(amount=None)
         mock_get.return_value = mock_resp
 
-        self.assertIsNone(fetch_prepaid_credits(_ORG_UUID))
+        self.assertIsNone(fetch_prepaid_credits(_ANY_ACCOUNT, _ORG_UUID))
 
     @patch('usage_monitor_for_claude.api.requests.get')
     @patch('usage_monitor_for_claude.api.api_headers', return_value={'Authorization': 'Bearer test'})
@@ -507,7 +460,7 @@ class TestFetchPrepaidCredits(unittest.TestCase):
                 mock_resp.json.return_value = _prepaid_response(amount=amount)
                 mock_get.return_value = mock_resp
 
-                self.assertIsNone(fetch_prepaid_credits(_ORG_UUID))
+                self.assertIsNone(fetch_prepaid_credits(_ANY_ACCOUNT, _ORG_UUID))
 
     @patch('usage_monitor_for_claude.api.requests.get')
     @patch('usage_monitor_for_claude.api.api_headers', return_value={'Authorization': 'Bearer test'})
@@ -517,7 +470,7 @@ class TestFetchPrepaidCredits(unittest.TestCase):
             with self.subTest(code=code):
                 mock_get.return_value = _http_error_response(code)
 
-                self.assertIsNone(fetch_prepaid_credits(_ORG_UUID))
+                self.assertIsNone(fetch_prepaid_credits(_ANY_ACCOUNT, _ORG_UUID))
 
     @patch('usage_monitor_for_claude.api.requests.get')
     @patch('usage_monitor_for_claude.api.api_headers', return_value={'Authorization': 'Bearer test'})
@@ -526,7 +479,7 @@ class TestFetchPrepaidCredits(unittest.TestCase):
         import requests
         mock_get.side_effect = requests.ConnectionError()
 
-        self.assertIsNone(fetch_prepaid_credits(_ORG_UUID))
+        self.assertIsNone(fetch_prepaid_credits(_ANY_ACCOUNT, _ORG_UUID))
 
     @patch('usage_monitor_for_claude.api.requests.get')
     @patch('usage_monitor_for_claude.api.api_headers', return_value={'Authorization': 'Bearer test'})
@@ -534,7 +487,7 @@ class TestFetchPrepaidCredits(unittest.TestCase):
         """No exception escapes - the caller stores the result without guarding."""
         mock_get.side_effect = RuntimeError('unexpected')
 
-        self.assertIsNone(fetch_prepaid_credits(_ORG_UUID))
+        self.assertIsNone(fetch_prepaid_credits(_ANY_ACCOUNT, _ORG_UUID))
 
     @patch('usage_monitor_for_claude.api.requests.get')
     @patch('usage_monitor_for_claude.api.api_headers', return_value={'Authorization': 'Bearer test'})
@@ -544,7 +497,7 @@ class TestFetchPrepaidCredits(unittest.TestCase):
         mock_resp.json.side_effect = ValueError('not JSON')
         mock_get.return_value = mock_resp
 
-        self.assertIsNone(fetch_prepaid_credits(_ORG_UUID))
+        self.assertIsNone(fetch_prepaid_credits(_ANY_ACCOUNT, _ORG_UUID))
 
     @patch('usage_monitor_for_claude.api.requests.get')
     @patch('usage_monitor_for_claude.api.api_headers', return_value={'Authorization': 'Bearer test'})
@@ -555,7 +508,7 @@ class TestFetchPrepaidCredits(unittest.TestCase):
         # to ^...$ without a single test noticing.
         for org_uuid in ('', '   ', 'not-a-uuid', f'{_ORG_UUID}/../../admin', f'../{_ORG_UUID}', f'{_ORG_UUID}\n', None, 123):
             with self.subTest(org_uuid=org_uuid):
-                self.assertIsNone(fetch_prepaid_credits(org_uuid))
+                self.assertIsNone(fetch_prepaid_credits(_ANY_ACCOUNT, org_uuid))
 
         mock_get.assert_not_called()
 
@@ -563,7 +516,7 @@ class TestFetchPrepaidCredits(unittest.TestCase):
     @patch('usage_monitor_for_claude.api.api_headers', return_value=None)
     def test_no_token_makes_no_request(self, _mock_headers, mock_get):
         """Without a token no request is made and None is returned."""
-        self.assertIsNone(fetch_prepaid_credits(_ORG_UUID))
+        self.assertIsNone(fetch_prepaid_credits(_ANY_ACCOUNT, _ORG_UUID))
         mock_get.assert_not_called()
 
 

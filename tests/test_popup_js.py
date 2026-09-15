@@ -26,7 +26,7 @@ class StubElement {
     constructor(tag) {
         this.tagName = tag;
         this.className = '';
-        this.textContent = '';
+        this._text = '';
         this.title = '';
         this.style = {};
         this.dataset = {};
@@ -47,6 +47,11 @@ class StubElement {
         };
     }
     _classSet() { return new Set(this.className.split(/\s+/).filter(Boolean)); }
+    // textContent aggregates child text (badge + name) like a real element,
+    // and clears children when assigned - matching DOM semantics closely
+    // enough for the badge/label scenarios.
+    get textContent() { return this.children.length ? this.children.map((child) => child.textContent).join('') : this._text; }
+    set textContent(value) { this._text = value; this.children = []; }
     appendChild(node) { node.parentNode = this; this.children.push(node); return node; }
     append(...nodes) { for (const node of nodes) this.appendChild(node); }
     replaceChildren(...nodes) { this.children = []; this.append(...nodes); }
@@ -78,6 +83,7 @@ class StubElement {
 
 globalThis.document = {
     createElement: (tag) => new StubElement(tag),
+    createTextNode: (text) => ({ textContent: text, parentNode: null, matches() { return false; }, querySelector() { return null; }, querySelectorAll() { return []; }, remove() {} }),
     body: new StubElement('body'),
 };
 globalThis.ResizeObserver = class { constructor() {} observe() {} };
@@ -90,24 +96,32 @@ els = { usageBars: document.createElement('div') };
 function makeEntry(overrides) {
     return Object.assign({
         key: 'five_hour', label: '5h', pct_text: '0%', fill_pct: 0.0,
-        warn: false, dividers: [], marker_rel: null, reset_text: '',
+        warn: false, dividers: [], marker_rel: null, reset_text: '', account_index: 0,
     }, overrides);
 }
 
 // Full element set for the scenarios that drive updateData() end to end.
 function makeEls() {
     const names = [
-        'accountSection', 'emailRow', 'emailValue', 'planRow', 'planValue',
+        'accountSection', 'headingAccount', 'accountRows',
         'usageSection', 'headingUsage', 'usageBars',
-        'extraSection', 'extraSpent', 'extraPct', 'extraBarContainer', 'extraFill', 'extraBalance',
+        'extraSection', 'extraRows',
         'installSection', 'installRows', 'statusSection', 'statusText',
     ];
     return Object.fromEntries(names.map((name) => [name, document.createElement('div')]));
 }
 
+function makeAccount(overrides) {
+    return Object.assign({ index: 0, label: 'a', email: 'a@example.com', plan: 'Max', error: null, refreshing: false }, overrides);
+}
+function makeGroup(key, label, bars) { return { key, label, bars }; }
+function makeData(overrides) {
+    return Object.assign({ accounts: [makeAccount()], usage_groups: [], extra: [], installations: [], status: null }, overrides);
+}
+
 function makeExtra(overrides) {
     return Object.assign({
-        has_limit: true, pct_text: '25%', fill_pct: 0.25, spent_text: '$25.00 / $100.00 spent', balance_text: '',
+        has_limit: true, pct_text: '25%', fill_pct: 0.25, spent_text: '$25.00 / $100.00 spent', balance_text: '', account_index: 0,
     }, overrides);
 }
 '''
@@ -127,21 +141,21 @@ def _run_scenario(scenario: str) -> dict:
 
 @unittest.skipUnless(_NODE, 'Node.js not available')
 class TestUsageBarUpdates(unittest.TestCase):
-    """Tests for updateUsageBars/updateBarElement in popup.js."""
+    """Tests for renderBars/updateBarElement in popup.js."""
 
     def test_changed_field_set_with_equal_count_updates_labels(self):
         """When the set of quota fields changes but the count stays the same
         (e.g. an account switch between plans), the bars must not show the new
         percentages under the old labels."""
         result = _run_scenario('''
-updateUsageBars([
+renderBars(els.usageBars, [
     makeEntry({ key: 'five_hour', label: '5h', pct_text: '10%' }),
     makeEntry({ key: 'seven_day', label: '7d', pct_text: '20%' }),
-]);
-updateUsageBars([
+], false);
+renderBars(els.usageBars, [
     makeEntry({ key: 'five_hour', label: '5h', pct_text: '30%' }),
     makeEntry({ key: 'seven_day_opus', label: '7d Opus', pct_text: '99%' }),
-]);
+], false);
 console.log(JSON.stringify(els.usageBars.children.map((bar) => ({
     label: bar.children[0].children[0].textContent,
     pct: bar.querySelector('.bar-pct').textContent,
@@ -158,13 +172,13 @@ console.log(JSON.stringify(els.usageBars.children.map((bar) => ({
         elements shift by 1 px after the first data update."""
         result = _run_scenario('''
 const fields = { key: 'five_hour', label: '5h', marker_rel: 0.5, dividers: [0.25] };
-updateUsageBars([makeEntry(Object.assign({ pct_text: '10%' }, fields))]);
+renderBars(els.usageBars, [makeEntry(Object.assign({ pct_text: '10%' }, fields))], false);
 const container = els.usageBars.children[0].querySelector('.bar-container');
 const before = {
     marker: container.querySelector('.bar-marker').style.left,
     divider: container.querySelector('.bar-divider').style.left,
 };
-updateUsageBars([makeEntry(Object.assign({ pct_text: '11%' }, fields))]);
+renderBars(els.usageBars, [makeEntry(Object.assign({ pct_text: '11%' }, fields))], false);
 const after = {
     marker: container.querySelector('.bar-marker').style.left,
     divider: container.querySelector('.bar-divider').style.left,
@@ -176,9 +190,9 @@ console.log(JSON.stringify({ before, after }));
     def test_unchanged_field_set_updates_in_place(self):
         """With an unchanged field set, bars are updated in place (no rebuild)."""
         result = _run_scenario('''
-updateUsageBars([makeEntry({ key: 'five_hour', label: '5h', pct_text: '10%' })]);
+renderBars(els.usageBars, [makeEntry({ key: 'five_hour', label: '5h', pct_text: '10%' })], false);
 const barBefore = els.usageBars.children[0];
-updateUsageBars([makeEntry({ key: 'five_hour', label: '5h', pct_text: '50%', fill_pct: 0.5 })]);
+renderBars(els.usageBars, [makeEntry({ key: 'five_hour', label: '5h', pct_text: '50%', fill_pct: 0.5 })], false);
 console.log(JSON.stringify({
     sameElement: els.usageBars.children[0] === barBefore,
     pct: els.usageBars.children[0].querySelector('.bar-pct').textContent,
@@ -186,6 +200,64 @@ console.log(JSON.stringify({
 }));
 ''')
         self.assertEqual(result, {'sameElement': True, 'pct': '50%', 'fillWidth': '50%'})
+
+    def test_grouped_render_one_bar_per_account(self):
+        result = _run_scenario('''
+els = makeEls();
+updateData(makeData({
+    accounts: [makeAccount(), makeAccount({ index: 1, label: 'b', email: 'b@example.com' })],
+    usage_groups: [makeGroup('five_hour', 'Session', [
+        makeEntry({ key: 'five_hour', label: 'Session', pct_text: '40%', account_index: 0 }),
+        makeEntry({ key: 'five_hour', label: 'Session', pct_text: '70%', account_index: 1 }),
+    ])],
+}));
+const group = els.usageBars.children[0];
+console.log(JSON.stringify({
+    heading: group.querySelector('.group-label').textContent,
+    bars: group.querySelectorAll('.usage-entry').map((bar) => ({ key: bar.dataset.key, badge: bar.querySelector('.badge').textContent, hasName: !!bar.querySelector('.bar-label'), pct: bar.querySelector('.bar-pct').textContent })),
+    accountRows: els.accountRows.children.length,
+}));
+''')
+        self.assertEqual(result['heading'], 'Session')
+        self.assertEqual(result['bars'], [
+            {'key': 'five_hour:0', 'badge': '1', 'hasName': False, 'pct': '40%'},
+            {'key': 'five_hour:1', 'badge': '2', 'hasName': False, 'pct': '70%'},
+        ])
+        self.assertEqual(result['accountRows'], 2)
+
+    def test_single_account_has_no_badges_and_group_label_is_bar_label(self):
+        result = _run_scenario('''
+els = makeEls();
+updateData(makeData({ usage_groups: [makeGroup('five_hour', 'Session (5hr)', [makeEntry({ key: 'five_hour', label: 'Session (5hr)', pct_text: '40%' })])] }));
+const bar = els.usageBars.children[0].querySelector('.usage-entry');
+console.log(JSON.stringify({
+    hasGroupLabel: !!els.usageBars.children[0].querySelector('.group-label'),
+    label: bar.querySelector('.bar-label').textContent,
+    badges: bar.querySelectorAll('.badge').length,
+}));
+''')
+        self.assertEqual(result, {'hasGroupLabel': False, 'label': 'Session (5hr)', 'badges': 0})
+
+    def test_compact_hide_hides_whole_group(self):
+        result = _run_scenario('''
+els = makeEls();
+compactHide = ['seven_day'];
+popupPinned = true;
+updateData(makeData({ usage_groups: [
+    makeGroup('five_hour', '5h', [makeEntry({ key: 'five_hour' })]),
+    makeGroup('seven_day', '7d', [makeEntry({ key: 'seven_day' })]),
+] }));
+console.log(JSON.stringify(els.usageBars.children.map((group) => group.dataset.key)));
+''')
+        self.assertEqual(result, ['five_hour'])
+
+    def test_account_row_shows_error(self):
+        result = _run_scenario('''
+els = makeEls();
+updateData(makeData({ accounts: [makeAccount({ error: 'HTTP 500' })] }));
+console.log(JSON.stringify({ text: els.accountRows.children[0].querySelector('.account-error').textContent }));
+''')
+        self.assertEqual(result, {'text': 'HTTP 500'})
 
 
 @unittest.skipUnless(_NODE, 'Node.js not available')
@@ -196,8 +268,9 @@ class TestExtraUsageSection(unittest.TestCase):
         """A rendered balance is shown below the extra-usage bar."""
         result = _run_scenario('''
 els = makeEls();
-updateData({ profile: null, usage: [], extra: makeExtra({ balance_text: '$55.97 available' }), installations: [], status: null });
-console.log(JSON.stringify({ text: els.extraBalance.textContent, display: els.extraBalance.style.display }));
+updateData(makeData({ extra: [makeExtra({ balance_text: '$55.97 available', account_index: 0 })] }));
+const balance = els.extraRows.children[0].querySelector('.extra-balance');
+console.log(JSON.stringify({ text: balance.textContent, display: balance.style.display }));
 ''')
         self.assertEqual(result, {'text': '$55.97 available', 'display': ''})
 
@@ -205,10 +278,12 @@ console.log(JSON.stringify({ text: els.extraBalance.textContent, display: els.ex
         """Without a balance the line is hidden, leaving the section as it was before."""
         result = _run_scenario('''
 els = makeEls();
-updateData({ profile: null, usage: [], extra: makeExtra(), installations: [], status: null });
-const empty = { text: els.extraBalance.textContent, display: els.extraBalance.style.display };
-updateData({ profile: null, usage: [], extra: makeExtra({ balance_text: undefined }), installations: [], status: null });
-const missing = { text: els.extraBalance.textContent, display: els.extraBalance.style.display };
+updateData(makeData({ extra: [makeExtra()] }));
+let balance = els.extraRows.children[0].querySelector('.extra-balance');
+const empty = { text: balance.textContent, display: balance.style.display };
+updateData(makeData({ extra: [makeExtra({ balance_text: undefined })] }));
+balance = els.extraRows.children[0].querySelector('.extra-balance');
+const missing = { text: balance.textContent, display: balance.style.display };
 console.log(JSON.stringify({ empty, missing }));
 ''')
         self.assertEqual(result, {
@@ -220,9 +295,10 @@ console.log(JSON.stringify({ empty, missing }));
         """A balance that becomes unavailable is removed instead of lingering."""
         result = _run_scenario('''
 els = makeEls();
-updateData({ profile: null, usage: [], extra: makeExtra({ balance_text: '$55.97 available' }), installations: [], status: null });
-updateData({ profile: null, usage: [], extra: makeExtra(), installations: [], status: null });
-console.log(JSON.stringify({ text: els.extraBalance.textContent, display: els.extraBalance.style.display }));
+updateData(makeData({ extra: [makeExtra({ balance_text: '$55.97 available' })] }));
+updateData(makeData({ extra: [makeExtra()] }));
+const balance = els.extraRows.children[0].querySelector('.extra-balance');
+console.log(JSON.stringify({ text: balance.textContent, display: balance.style.display }));
 ''')
         self.assertEqual(result, {'text': '', 'display': 'none'})
 
