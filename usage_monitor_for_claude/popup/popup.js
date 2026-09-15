@@ -5,7 +5,6 @@ let textTimerId = null;
 let popupPinned = false;
 let compactHide = [];
 let lastData = null;
-let accountsById = {};
 
 /**
  * Set CSS custom properties for theme colors and inject translation strings.
@@ -150,28 +149,28 @@ function setupPinnedDrag() {
 
 function barKey(entry) { return `${entry.key}:${entry.account_index}`; }
 
-function badge(index) {
-    const span = document.createElement('span');
-    span.className = 'badge';
-    span.textContent = String(index + 1);
-    return span;
+function accountName(account) {
+    const name = document.createElement('span');
+    name.className = 'account-name';
+    name.textContent = account.email || account.label;
+    return name;
 }
 
-function updateAccounts(accounts, multi) {
-    els.headingAccount.textContent = multi ? translations.accounts : translations.account;
+function accountPlan(account) {
+    const plan = document.createElement('span');
+    plan.className = 'account-plan';
+    plan.textContent = account.plan || '';
+    return plan;
+}
+
+// The single-account identity row.  With several accounts the identity moves
+// into each account block's heading instead (see createAccountBlock).
+function updateAccounts(accounts) {
+    els.headingAccount.textContent = translations.account;
     els.accountRows.replaceChildren(...accounts.map((account) => {
         const row = document.createElement('div');
         row.className = 'account-row';
-        const name = document.createElement('span');
-        name.className = 'account-name';
-        if (multi) name.appendChild(badge(account.index));
-        const text = document.createElement('span');
-        text.textContent = account.email || account.label;
-        name.appendChild(text);
-        const plan = document.createElement('span');
-        plan.className = 'account-plan';
-        plan.textContent = account.plan || '';
-        row.append(name, plan);
+        row.append(accountName(account), accountPlan(account));
         if (account.error) {
             const error = document.createElement('div');
             error.className = 'account-error';
@@ -190,31 +189,12 @@ function updateAccounts(accounts, multi) {
 function updateData(data) {
     lastData = data;
     const accounts = data.accounts || [];
-    const multi = accounts.length > 1;
-    accountsById = Object.fromEntries(accounts.map((account) => [account.index, account]));
 
-    const accountVisible = accounts.length > 0 && !compactHidden('account');
-    els.accountSection.classList.toggle('visible', accountVisible);
-    if (accountVisible) updateAccounts(accounts, multi);
-
-    const groups = (data.usage_groups || []).filter((group) => !compactHidden(group.key));
-    const hasUsage = !!groups.length;
-    els.usageSection.classList.toggle('visible', hasUsage);
-    if (hasUsage) updateUsageGroups(groups, multi);
-
-    const extra = data.extra || [];
-    const extraVisible = !!extra.length && !compactHidden('extra_usage');
-    els.extraSection.classList.toggle('visible', extraVisible);
-    if (extraVisible) updateExtra(extra, multi);
-
+    // Installations first: the single-account "Usage" heading decides whether
+    // to hide itself based on whether any later section is visible.
     const hasInstalls = !!data.installations?.length;
     const installsVisible = hasInstalls && !compactHidden('claude_code');
     els.installSection.classList.toggle('visible', installsVisible);
-
-    // The "Usage" heading only labels the bars against the other sections;
-    // when the usage bars stand alone, drop the now-redundant heading.
-    els.headingUsage.style.display = (hasUsage && !accountVisible && !extraVisible && !installsVisible) ? 'none' : '';
-
     if (hasInstalls) {
         els.installRows.replaceChildren(...data.installations.map((inst) => {
             const row = document.createElement('div');
@@ -227,7 +207,50 @@ function updateData(data) {
         }));
     }
 
+    if (accounts.length > 1) {
+        renderMultiAccount(accounts);
+    } else {
+        renderSingleAccount(accounts[0] || null);
+    }
+
     updateStatus(data.status);
+}
+
+// Single account: identity row, then its quota bars, then its extra usage -
+// the original three-section layout with no per-account grouping.
+function renderSingleAccount(account) {
+    els.headingAccount.textContent = translations.account;
+    const accountVisible = !!account && !compactHidden('account');
+    els.accountSection.classList.toggle('visible', accountVisible);
+    if (accountVisible) updateAccounts([account]);
+
+    const bars = account ? account.bars.filter((bar) => !compactHidden(bar.key)) : [];
+    const hasUsage = !!bars.length;
+    els.usageSection.classList.toggle('visible', hasUsage);
+    if (hasUsage) renderBars(els.usageBars, bars);
+
+    const extra = (account && account.extra && !compactHidden('extra_usage')) ? account.extra : null;
+    els.extraSection.classList.toggle('visible', !!extra);
+    if (extra) renderExtraInto(els.extraRows, extra);
+
+    // The "Usage" heading only labels the bars against the other sections;
+    // when the usage bars stand alone, drop the now-redundant heading.
+    const standalone = hasUsage && !accountVisible && !extra && !els.installSection.classList.contains('visible');
+    els.headingUsage.style.display = standalone ? 'none' : '';
+}
+
+// Several accounts: one block per account (identity heading + its bars + its
+// extra usage), rendered into the usage section.  The separate account and
+// extra sections fold into those blocks, and the account names replace the
+// "Usage" heading.
+function renderMultiAccount(accounts) {
+    els.accountSection.classList.remove('visible');
+    els.extraSection.classList.remove('visible');
+    els.headingUsage.style.display = 'none';
+
+    const hasContent = accounts.some((account) => account.bars.length || account.extra || account.error);
+    els.usageSection.classList.toggle('visible', hasContent);
+    if (hasContent) updateAccountBlocks(accounts);
 }
 
 /**
@@ -342,42 +365,74 @@ function formatCountdown(totalSeconds) {
     return translations.duration_m.replace('{m}', totalMin);
 }
 
-function updateUsageGroups(groups, multi) {
-    // Rebuild the group scaffold only when the set of quota models changes;
-    // otherwise the per-account bars inside each group update in place.
+function updateAccountBlocks(accounts) {
+    // Rebuild the block scaffold only when the set of accounts changes;
+    // otherwise each block's heading, bars and extra update in place so the
+    // bar-fill transition is not restarted on every poll.
     const existing = els.usageBars.children;
-    const sameGroups = groups.length === existing.length && groups.every((group, i) => existing[i].dataset.key === group.key);
-    if (!sameGroups) {
-        els.usageBars.replaceChildren(...groups.map((group) => {
-            const div = document.createElement('div');
-            div.className = 'usage-group';
-            div.dataset.key = group.key;
-            if (multi) {
-                const label = document.createElement('div');
-                label.className = 'group-label';
-                label.textContent = group.label;
-                div.appendChild(label);
-            }
-            const bars = document.createElement('div');
-            bars.className = 'group-bars';
-            div.appendChild(bars);
-            return div;
-        }));
-    }
-    for (let i = 0; i < groups.length; i++) {
-        renderBars(els.usageBars.children[i].querySelector('.group-bars'), groups[i].bars, multi);
+    const sameBlocks = accounts.length === existing.length
+        && accounts.every((account, i) => existing[i].dataset.index === String(account.index));
+    if (!sameBlocks) {
+        els.usageBars.replaceChildren(...accounts.map(createAccountBlock));
+    } else {
+        for (let i = 0; i < accounts.length; i++) updateAccountBlock(existing[i], accounts[i]);
     }
 }
 
-function renderBars(container, entries, multi) {
-    // Rebuild whenever the (field, account) set changes, not only the count -
-    // after an account switch the same number of bars can carry different
-    // quotas, and an in-place update would show the new values under the old
-    // labels.
+function shownBars(account) {
+    return account.bars.filter((bar) => !compactHidden(bar.key));
+}
+
+function shownExtra(account) {
+    return (account.extra && !compactHidden('extra_usage')) ? account.extra : null;
+}
+
+function createAccountBlock(account) {
+    const block = document.createElement('div');
+    block.className = 'account-block';
+    block.dataset.index = String(account.index);
+
+    const head = document.createElement('div');
+    head.className = 'account-block-head';
+    head.append(accountName(account), accountPlan(account));
+    block.appendChild(head);
+
+    const error = document.createElement('div');
+    error.className = 'account-error';
+    block.appendChild(error);
+
+    const bars = document.createElement('div');
+    bars.className = 'account-bars';
+    block.appendChild(bars);
+
+    const extra = document.createElement('div');
+    extra.className = 'account-extra';
+    block.appendChild(extra);
+
+    updateAccountBlock(block, account);
+    return block;
+}
+
+function updateAccountBlock(block, account) {
+    block.querySelector('.account-name').textContent = account.email || account.label;
+    block.querySelector('.account-plan').textContent = account.plan || '';
+
+    const error = block.querySelector('.account-error');
+    error.textContent = account.error || '';
+    error.style.display = account.error ? '' : 'none';
+
+    renderBars(block.querySelector('.account-bars'), shownBars(account));
+    renderExtraInto(block.querySelector('.account-extra'), shownExtra(account));
+}
+
+function renderBars(container, entries) {
+    // Rebuild whenever the field set changes, not only the count - after an
+    // account switch the same number of bars can carry different quotas, and
+    // an in-place update would show the new values under the old labels.
     const bars = container.children;
     const sameFields = entries.length === bars.length && entries.every((entry, i) => bars[i].dataset.key === barKey(entry));
     if (!sameFields) {
-        container.replaceChildren(...entries.map((entry) => createBarElement(entry, multi)));
+        container.replaceChildren(...entries.map(createBarElement));
         requestAnimationFrame(() => {
             for (let i = 0; i < entries.length; i++) {
                 container.children[i].querySelector('.bar-fill').style.width = `${entries[i].fill_pct * 100}%`;
@@ -388,7 +443,7 @@ function renderBars(container, entries, multi) {
     }
 }
 
-function createBarElement(entry, multi) {
+function createBarElement(entry) {
     const div = document.createElement('div');
     div.className = 'usage-entry';
     div.dataset.key = barKey(entry);
@@ -396,6 +451,13 @@ function createBarElement(entry, multi) {
     const pct = document.createElement('span');
     pct.className = 'bar-pct';
     pct.textContent = entry.pct_text;
+
+    const header = document.createElement('div');
+    header.className = 'bar-header';
+    const label = document.createElement('span');
+    label.className = 'bar-label';
+    label.textContent = entry.label;
+    header.append(label, pct);
 
     const container = document.createElement('div');
     container.className = 'bar-container';
@@ -419,23 +481,7 @@ function createBarElement(entry, multi) {
         container.appendChild(marker);
     }
 
-    if (multi) {
-        // The account is identified by a badge in front of the bar; its name
-        // lives once in the ACCOUNTS list and the quota name in the group
-        // heading, so neither is repeated on the bar.
-        const row = document.createElement('div');
-        row.className = 'bar-row';
-        row.append(badge(entry.account_index), container, pct);
-        div.appendChild(row);
-    } else {
-        const header = document.createElement('div');
-        header.className = 'bar-header';
-        const label = document.createElement('span');
-        label.className = 'bar-label';
-        label.textContent = entry.label;
-        header.append(label, pct);
-        div.append(header, container);
-    }
+    div.append(header, container);
 
     if (entry.reset_text) {
         const reset = document.createElement('div');
@@ -488,21 +534,20 @@ function updateBarElement(div, entry) {
     }
 }
 
-function updateExtra(entries, multi) {
-    // The count changes only when an account gains or loses extra usage, which
-    // is rare; each entry then rebuilds, otherwise the row updates in place.
-    // A change in badge visibility (single <-> multi) also forces a rebuild,
-    // since the in-place path never touches the account badge.
-    const rows = els.extraRows.children;
-    const badgeMismatch = rows.length > 0 && multi !== !!rows[0].querySelector('.badge');
-    if (entries.length !== rows.length || badgeMismatch) {
-        els.extraRows.replaceChildren(...entries.map((entry) => createExtraElement(entry, multi)));
+// Render an account's single extra-usage entry into *container* (or clear it
+// when the account has no extra usage).  Rebuilds only when extra usage
+// appears or disappears; otherwise the row updates in place.
+function renderExtraInto(container, entry) {
+    const entries = entry ? [entry] : [];
+    const rows = container.children;
+    if (entries.length !== rows.length) {
+        container.replaceChildren(...entries.map(createExtraElement));
     } else {
         for (let i = 0; i < entries.length; i++) updateExtraElement(rows[i], entries[i]);
     }
 }
 
-function createExtraElement(entry, multi) {
+function createExtraElement(entry) {
     const div = document.createElement('div');
     div.className = 'usage-entry';
 
@@ -510,7 +555,6 @@ function createExtraElement(entry, multi) {
     header.className = 'bar-header';
     const spent = document.createElement('span');
     spent.className = 'extra-spent';
-    if (multi) spent.appendChild(badge(entry.account_index));
     const spentValue = document.createElement('span');
     spentValue.className = 'extra-spent-value';
     spentValue.textContent = entry.spent_text;

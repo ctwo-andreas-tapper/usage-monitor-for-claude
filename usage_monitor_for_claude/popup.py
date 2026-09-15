@@ -151,24 +151,34 @@ def _combined_usage(snaps: list[CacheSnapshot]) -> dict[str, Any]:
     return combined
 
 
+def _account_bars(snap: CacheSnapshot, field_order: list[str], account_index: int) -> list[dict[str, Any]]:
+    """Return one account's quota bars, in the shared field order."""
+    bars = []
+    for field in field_order:
+        entry = snap.usage.get(field) if snap.usage else None
+        bar = _bar(field, popup_label(field), entry, field_period(field), account_index)
+        if bar is not None:
+            bars.append(bar)
+    return bars
+
+
 def _popup_data(monitors: list[Any], installations: list[dict[str, str]] | None = None) -> dict[str, Any]:
-    """Build the JSON payload for popup.js from every account's snapshot."""
+    """Build the JSON payload for popup.js from every account's snapshot.
+
+    Each account carries its own quota bars and extra-usage entry so the
+    popup renders one section per account.  Field order is shared across
+    accounts (the union of every account's fields, canonical order) so the
+    same quota lines up in the same place in each account's section.
+    """
     snaps = [monitor.cache.snapshot for monitor in monitors]
-    accounts = [_account_entry(index, monitor, snap) for index, (monitor, snap) in enumerate(zip(monitors, snaps))]
+    field_order = expand_popup_fields(POPUP_FIELDS, _combined_usage(snaps))
 
-    usage_groups = []
-    for field in expand_popup_fields(POPUP_FIELDS, _combined_usage(snaps)):
-        period = field_period(field)
-        label = popup_label(field)
-        bars = []
-        for index, snap in enumerate(snaps):
-            bar = _bar(field, label, snap.usage.get(field) if snap.usage else None, period, index)
-            if bar is not None:
-                bars.append(bar)
-        if bars:
-            usage_groups.append({'key': field, 'label': label, 'bars': bars})
-
-    extra = [entry for entry in (_extra_entry(snap, index) for index, snap in enumerate(snaps)) if entry is not None]
+    accounts = []
+    for index, (monitor, snap) in enumerate(zip(monitors, snaps)):
+        account = _account_entry(index, monitor, snap)
+        account['bars'] = _account_bars(snap, field_order, index)
+        account['extra'] = _extra_entry(snap, index)
+        accounts.append(account)
 
     if installations is None:
         installations = [{'name': i.name, 'version': i.version} for i in find_installations()]
@@ -191,7 +201,7 @@ def _popup_data(monitors: list[Any], installations: list[dict[str, str]] | None 
             'error': first_error[:120] if first_error else None,
         }
 
-    return {'accounts': accounts, 'usage_groups': usage_groups, 'extra': extra, 'installations': installations, 'status': status}
+    return {'accounts': accounts, 'installations': installations, 'status': status}
 
 
 def _init_config(monitors: list[Any]) -> dict[str, Any]:

@@ -143,29 +143,21 @@ dl > div {
     & .account-error { flex-basis: 100%; font-size: 12px; color: var(--bar-fg-warn); }
 }
 
-.badge {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    min-width: 16px;
-    height: 16px;
-    padding: 0 4px;
-    border-radius: 8px;
-    background: var(--bar-bg);
-    color: var(--fg-heading);
-    font-size: 10px;
-    font-weight: 700;
-}
-
-.usage-group { display: flex; flex-direction: column; gap: 6px; }
-.group-label { font-size: 13px; color: var(--fg-heading); }
-.group-bars { display: flex; flex-direction: column; gap: 8px; }
 .bar-label { display: inline-flex; align-items: center; gap: 6px; }
 
-/* Multi-account bar: badge in front, bar fills the middle, percentage trails. */
-.bar-row { display: flex; align-items: center; gap: 8px; }
-.bar-row .bar-container { flex: 1; }
-.bar-row .bar-pct { flex-shrink: 0; font-size: 13px; }
+/* One block per account: identity heading, then its bars and extra usage. */
+.account-block { display: flex; flex-direction: column; gap: 8px; }
+.account-block-head {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    font-size: 13px;
+
+    & .account-name { color: var(--fg-heading); font-weight: 600; min-width: 0; }
+    & .account-plan { color: var(--fg-dim); }
+}
+.account-bars, .account-extra { display: flex; flex-direction: column; gap: 8px; }
+.account-bars:empty, .account-extra:empty { display: none; }
 
 /* Rows of blocks: one per quota model, and the extra-usage bar next to the
    prepaid balance.  The gap is the standard separator between blocks. */

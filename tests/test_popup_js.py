@@ -112,11 +112,10 @@ function makeEls() {
 }
 
 function makeAccount(overrides) {
-    return Object.assign({ index: 0, label: 'a', email: 'a@example.com', plan: 'Max', error: null, refreshing: false }, overrides);
+    return Object.assign({ index: 0, label: 'a', email: 'a@example.com', plan: 'Max', error: null, refreshing: false, bars: [], extra: null }, overrides);
 }
-function makeGroup(key, label, bars) { return { key, label, bars }; }
 function makeData(overrides) {
-    return Object.assign({ accounts: [makeAccount()], usage_groups: [], extra: [], installations: [], status: null }, overrides);
+    return Object.assign({ accounts: [makeAccount()], installations: [], status: null }, overrides);
 }
 
 function makeExtra(overrides) {
@@ -201,55 +200,64 @@ console.log(JSON.stringify({
 ''')
         self.assertEqual(result, {'sameElement': True, 'pct': '50%', 'fillWidth': '50%'})
 
-    def test_grouped_render_one_bar_per_account(self):
+    def test_multi_account_one_block_per_account(self):
+        """Several accounts render one block each: a name heading, its own
+        quota bars labelled by quota, and no number badges."""
         result = _run_scenario('''
 els = makeEls();
 updateData(makeData({
-    accounts: [makeAccount(), makeAccount({ index: 1, label: 'b', email: 'b@example.com' })],
-    usage_groups: [makeGroup('five_hour', 'Session', [
-        makeEntry({ key: 'five_hour', label: 'Session', pct_text: '40%', account_index: 0 }),
-        makeEntry({ key: 'five_hour', label: 'Session', pct_text: '70%', account_index: 1 }),
-    ])],
+    accounts: [
+        makeAccount({ bars: [makeEntry({ key: 'five_hour', label: 'Session', pct_text: '40%', account_index: 0 })] }),
+        makeAccount({ index: 1, label: 'b', email: 'b@example.com', bars: [makeEntry({ key: 'five_hour', label: 'Session', pct_text: '70%', account_index: 1 })] }),
+    ],
 }));
-const group = els.usageBars.children[0];
+const blocks = els.usageBars.children;
 console.log(JSON.stringify({
-    heading: group.querySelector('.group-label').textContent,
-    bars: group.querySelectorAll('.usage-entry').map((bar) => ({ key: bar.dataset.key, badge: bar.querySelector('.badge').textContent, hasName: !!bar.querySelector('.bar-label'), pct: bar.querySelector('.bar-pct').textContent })),
-    accountRows: els.accountRows.children.length,
+    blockCount: blocks.length,
+    names: blocks.map((block) => block.querySelector('.account-name').textContent),
+    firstBar: {
+        label: blocks[0].querySelector('.bar-label').textContent,
+        pct: blocks[0].querySelector('.bar-pct').textContent,
+        badges: blocks[0].querySelectorAll('.badge').length,
+    },
+    secondPct: blocks[1].querySelector('.bar-pct').textContent,
+    accountSectionVisible: els.accountSection.classList.contains('visible'),
 }));
 ''')
-        self.assertEqual(result['heading'], 'Session')
-        self.assertEqual(result['bars'], [
-            {'key': 'five_hour:0', 'badge': '1', 'hasName': False, 'pct': '40%'},
-            {'key': 'five_hour:1', 'badge': '2', 'hasName': False, 'pct': '70%'},
-        ])
-        self.assertEqual(result['accountRows'], 2)
+        self.assertEqual(result['blockCount'], 2)
+        self.assertEqual(result['names'], ['a@example.com', 'b@example.com'])
+        self.assertEqual(result['firstBar'], {'label': 'Session', 'pct': '40%', 'badges': 0})
+        self.assertEqual(result['secondPct'], '70%')
+        self.assertFalse(result['accountSectionVisible'])
 
-    def test_single_account_has_no_badges_and_group_label_is_bar_label(self):
+    def test_single_account_bars_are_labelled_and_have_no_blocks(self):
+        """A lone account keeps the flat labelled-bar layout with the identity
+        in the account row - no per-account block, no badges."""
         result = _run_scenario('''
 els = makeEls();
-updateData(makeData({ usage_groups: [makeGroup('five_hour', 'Session (5hr)', [makeEntry({ key: 'five_hour', label: 'Session (5hr)', pct_text: '40%' })])] }));
-const bar = els.usageBars.children[0].querySelector('.usage-entry');
+updateData(makeData({ accounts: [makeAccount({ bars: [makeEntry({ key: 'five_hour', label: 'Session (5hr)', pct_text: '40%' })] })] }));
+const bar = els.usageBars.children[0];
 console.log(JSON.stringify({
-    hasGroupLabel: !!els.usageBars.children[0].querySelector('.group-label'),
+    hasBlockHead: !!els.usageBars.querySelector('.account-block-head'),
     label: bar.querySelector('.bar-label').textContent,
     badges: bar.querySelectorAll('.badge').length,
+    accountName: els.accountRows.children[0].querySelector('.account-name').textContent,
 }));
 ''')
-        self.assertEqual(result, {'hasGroupLabel': False, 'label': 'Session (5hr)', 'badges': 0})
+        self.assertEqual(result, {'hasBlockHead': False, 'label': 'Session (5hr)', 'badges': 0, 'accountName': 'a@example.com'})
 
-    def test_compact_hide_hides_whole_group(self):
+    def test_compact_hide_hides_a_quota_bar(self):
         result = _run_scenario('''
 els = makeEls();
 compactHide = ['seven_day'];
 popupPinned = true;
-updateData(makeData({ usage_groups: [
-    makeGroup('five_hour', '5h', [makeEntry({ key: 'five_hour' })]),
-    makeGroup('seven_day', '7d', [makeEntry({ key: 'seven_day' })]),
-] }));
-console.log(JSON.stringify(els.usageBars.children.map((group) => group.dataset.key)));
+updateData(makeData({ accounts: [makeAccount({ bars: [
+    makeEntry({ key: 'five_hour' }),
+    makeEntry({ key: 'seven_day' }),
+] })] }));
+console.log(JSON.stringify(els.usageBars.children.map((bar) => bar.dataset.key)));
 ''')
-        self.assertEqual(result, ['five_hour'])
+        self.assertEqual(result, ['five_hour:0'])
 
     def test_account_row_shows_error(self):
         result = _run_scenario('''
@@ -268,7 +276,7 @@ class TestExtraUsageSection(unittest.TestCase):
         """A rendered balance is shown below the extra-usage bar."""
         result = _run_scenario('''
 els = makeEls();
-updateData(makeData({ extra: [makeExtra({ balance_text: '$55.97 available', account_index: 0 })] }));
+updateData(makeData({ accounts: [makeAccount({ extra: makeExtra({ balance_text: '$55.97 available', account_index: 0 }) })] }));
 const balance = els.extraRows.children[0].querySelector('.extra-balance');
 console.log(JSON.stringify({ text: balance.textContent, display: balance.style.display }));
 ''')
@@ -278,10 +286,10 @@ console.log(JSON.stringify({ text: balance.textContent, display: balance.style.d
         """Without a balance the line is hidden, leaving the section as it was before."""
         result = _run_scenario('''
 els = makeEls();
-updateData(makeData({ extra: [makeExtra()] }));
+updateData(makeData({ accounts: [makeAccount({ extra: makeExtra() })] }));
 let balance = els.extraRows.children[0].querySelector('.extra-balance');
 const empty = { text: balance.textContent, display: balance.style.display };
-updateData(makeData({ extra: [makeExtra({ balance_text: undefined })] }));
+updateData(makeData({ accounts: [makeAccount({ extra: makeExtra({ balance_text: undefined }) })] }));
 balance = els.extraRows.children[0].querySelector('.extra-balance');
 const missing = { text: balance.textContent, display: balance.style.display };
 console.log(JSON.stringify({ empty, missing }));
@@ -295,8 +303,8 @@ console.log(JSON.stringify({ empty, missing }));
         """A balance that becomes unavailable is removed instead of lingering."""
         result = _run_scenario('''
 els = makeEls();
-updateData(makeData({ extra: [makeExtra({ balance_text: '$55.97 available' })] }));
-updateData(makeData({ extra: [makeExtra()] }));
+updateData(makeData({ accounts: [makeAccount({ extra: makeExtra({ balance_text: '$55.97 available' }) })] }));
+updateData(makeData({ accounts: [makeAccount({ extra: makeExtra() })] }));
 const balance = els.extraRows.children[0].querySelector('.extra-balance');
 console.log(JSON.stringify({ text: balance.textContent, display: balance.style.display }));
 ''')

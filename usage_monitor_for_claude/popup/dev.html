@@ -228,22 +228,9 @@ function usageBar(loc, entry, accountIndex) {
     };
 }
 
-// Fold each account's usage into groups keyed by quota model, one bar per
-// reporting account, preserving first-seen order (accounts, then fields).
-function usageGroups(loc, accountUsages) {
-    const order = [];
-    const byKey = {};
-    for (const { index, usage } of accountUsages) {
-        for (const entry of usage || []) {
-            const bar = usageBar(loc, entry, index);
-            if (!byKey[bar.key]) {
-                byKey[bar.key] = { key: bar.key, label: bar.label, bars: [] };
-                order.push(bar.key);
-            }
-            byKey[bar.key].bars.push(bar);
-        }
-    }
-    return order.map((key) => byKey[key]);
+// Build one account's quota bars from its usage list, preserving order.
+function accountBars(loc, usage, accountIndex) {
+    return (usage || []).map((entry) => usageBar(loc, entry, accountIndex));
 }
 
 function extraEntry(loc, extra, accountIndex) {
@@ -275,23 +262,21 @@ function resolveData(name, loc) {
         const accounts = preset.accounts.map((account, index) => ({
             index, label: account.label, email: account.email || '', plan: account.plan || '',
             error: account.error || null, refreshing: false,
+            bars: accountBars(loc, account.usage, index),
+            extra: extraEntry(loc, account.extra, index),
         }));
-        const usage_groups = usageGroups(loc, preset.accounts.map((account, index) => ({ index, usage: account.usage })));
-        const extra = [];
-        preset.accounts.forEach((account, index) => {
-            const entry = extraEntry(loc, account.extra, index);
-            if (entry) extra.push(entry);
-        });
-        return { accounts, usage_groups, extra, installations: preset.installations || [], status: resolveStatus(preset, loc) };
+        return { accounts, installations: preset.installations || [], status: resolveStatus(preset, loc) };
     }
 
-    const accounts = preset.profile
-        ? [{ index: 0, label: 'default', email: preset.profile.email || '', plan: preset.profile.plan || '', error: null, refreshing: false }]
+    const accounts = (preset.profile || preset.usage || preset.extra)
+        ? [{
+            index: 0, label: 'default', email: (preset.profile && preset.profile.email) || '',
+            plan: (preset.profile && preset.profile.plan) || '', error: null, refreshing: false,
+            bars: accountBars(loc, preset.usage, 0),
+            extra: extraEntry(loc, preset.extra, 0),
+        }]
         : [];
-    const usage_groups = usageGroups(loc, [{ index: 0, usage: preset.usage }]);
-    const singleExtra = extraEntry(loc, preset.extra, 0);
-    const extra = singleExtra ? [singleExtra] : [];
-    return { accounts, usage_groups, extra, installations: preset.installations || [], status: resolveStatus(preset, loc) };
+    return { accounts, installations: preset.installations || [], status: resolveStatus(preset, loc) };
 }
 
 // Try both layouts: server rooted at the repo (dev.html under
@@ -345,18 +330,18 @@ function randomize() {
     location.hash = 'randomize';
     currentPreset = 'full';
     const data = resolveData('full', currentLocale);
-    for (const group of data.usage_groups) {
-        for (const bar of group.bars) {
+    for (const account of data.accounts) {
+        for (const bar of account.bars) {
             const pct = Math.round(Math.random() * 100);
             bar.fill_pct = pct / 100;
             bar.pct_text = pct + '%';
             bar.warn = bar.marker_rel !== null && pct / 100 > bar.marker_rel;
         }
-    }
-    for (const entry of data.extra) {
-        const pct = Math.round(Math.random() * 100);
-        entry.fill_pct = pct / 100;
-        entry.pct_text = pct + '%';
+        if (account.extra) {
+            const pct = Math.round(Math.random() * 100);
+            account.extra.fill_pct = pct / 100;
+            account.extra.pct_text = pct + '%';
+        }
     }
     win().updateData(data);
 }

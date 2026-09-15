@@ -208,21 +208,21 @@ class TestPopupData(unittest.TestCase):
     # -- usage bars --
 
     def test_no_usage_data(self):
-        """Empty usage dict produces empty usage_groups list."""
+        """Empty usage dict produces an empty bars list on the account."""
         result = _popup_data(_monitors(_snap()), installations=[])
-        self.assertEqual(result['usage_groups'], [])
+        self.assertEqual(result['accounts'][0]['bars'], [])
 
     def test_skips_entries_without_utilization(self):
         """Entries with None utilization are omitted."""
         usage = {'five_hour': {'utilization': None}}
         result = _popup_data(_monitors(_snap(usage=usage)), installations=[])
-        self.assertEqual(result['usage_groups'], [])
+        self.assertEqual(result['accounts'][0]['bars'], [])
 
     def test_skips_missing_entries(self):
         """Missing usage keys produce no bar entries."""
         usage = {'five_hour': None}
         result = _popup_data(_monitors(_snap(usage=usage)), installations=[])
-        self.assertEqual(result['usage_groups'], [])
+        self.assertEqual(result['accounts'][0]['bars'], [])
 
     @patch('usage_monitor_for_claude.popup.elapsed_pct', return_value=None)
     @patch('usage_monitor_for_claude.popup.time_until', return_value='5h 0m')
@@ -232,8 +232,8 @@ class TestPopupData(unittest.TestCase):
         usage = {'five_hour': {'utilization': 42, 'resets_at': '2026-01-01T05:00:00Z'}}
         result = _popup_data(_monitors(_snap(usage=usage)), installations=[])
 
-        self.assertEqual(len(result['usage_groups']), 1)
-        bar = result['usage_groups'][0]['bars'][0]
+        self.assertEqual(len(result['accounts'][0]['bars']), 1)
+        bar = result['accounts'][0]['bars'][0]
         self.assertEqual(bar['account_index'], 0)
         self.assertEqual(bar['pct_text'], '42%')
         self.assertAlmostEqual(bar['fill_pct'], 0.42)
@@ -247,10 +247,8 @@ class TestPopupData(unittest.TestCase):
         usage = {'seven_day_fable': {'utilization': 0.0, 'resets_at': None}}
         result = _popup_data(_monitors(_snap(usage=usage)), installations=[])
 
-        self.assertEqual(len(result['usage_groups']), 1)
-        group = result['usage_groups'][0]
-        self.assertEqual(group['key'], 'seven_day_fable')
-        bar = group['bars'][0]
+        self.assertEqual(len(result['accounts'][0]['bars']), 1)
+        bar = result['accounts'][0]['bars'][0]
         self.assertEqual(bar['key'], 'seven_day_fable')
         self.assertEqual(bar['pct_text'], '0%')
         self.assertEqual(bar['fill_pct'], 0.0)
@@ -267,7 +265,7 @@ class TestPopupData(unittest.TestCase):
         usage = {'five_hour': {'utilization': 60, 'resets_at': '2026-01-01T05:00:00Z'}}
         result = _popup_data(_monitors(_snap(usage=usage)), installations=[])
 
-        bar = result['usage_groups'][0]['bars'][0]
+        bar = result['accounts'][0]['bars'][0]
         self.assertTrue(bar['warn'])
         self.assertAlmostEqual(bar['marker_rel'], 0.3)
 
@@ -279,7 +277,7 @@ class TestPopupData(unittest.TestCase):
         usage = {'five_hour': {'utilization': 40, 'resets_at': '2026-01-01T05:00:00Z'}}
         result = _popup_data(_monitors(_snap(usage=usage)), installations=[])
 
-        bar = result['usage_groups'][0]['bars'][0]
+        bar = result['accounts'][0]['bars'][0]
         self.assertFalse(bar['warn'])
 
     @patch('usage_monitor_for_claude.popup.elapsed_pct', return_value=50.0)
@@ -289,7 +287,7 @@ class TestPopupData(unittest.TestCase):
         """Exactly equal usage and elapsed is not a warning (strictly greater)."""
         usage = {'five_hour': {'utilization': 50, 'resets_at': '2026-01-01T05:00:00Z'}}
         result = _popup_data(_monitors(_snap(usage=usage)), installations=[])
-        self.assertFalse(result['usage_groups'][0]['bars'][0]['warn'])
+        self.assertFalse(result['accounts'][0]['bars'][0]['warn'])
 
     @patch('usage_monitor_for_claude.popup.elapsed_pct', return_value=None)
     @patch('usage_monitor_for_claude.popup.time_until', return_value='')
@@ -298,7 +296,7 @@ class TestPopupData(unittest.TestCase):
         """Bar at 100% is warn even when no time period (time_pct is None)."""
         usage = {'five_hour': {'utilization': 100, 'resets_at': ''}}
         result = _popup_data(_monitors(_snap(usage=usage)), installations=[])
-        self.assertTrue(result['usage_groups'][0]['bars'][0]['warn'])
+        self.assertTrue(result['accounts'][0]['bars'][0]['warn'])
 
     @patch('usage_monitor_for_claude.popup.elapsed_pct', return_value=100.0)
     @patch('usage_monitor_for_claude.popup.time_until', return_value='')
@@ -307,7 +305,7 @@ class TestPopupData(unittest.TestCase):
         """Bar at 100% is warn even when elapsed time is also 100% (strict > would miss this)."""
         usage = {'five_hour': {'utilization': 100, 'resets_at': '2026-01-01T05:00:00Z'}}
         result = _popup_data(_monitors(_snap(usage=usage)), installations=[])
-        self.assertTrue(result['usage_groups'][0]['bars'][0]['warn'])
+        self.assertTrue(result['accounts'][0]['bars'][0]['warn'])
 
     @patch('usage_monitor_for_claude.popup.elapsed_pct', return_value=None)
     @patch('usage_monitor_for_claude.popup.time_until', return_value='')
@@ -316,7 +314,7 @@ class TestPopupData(unittest.TestCase):
         """Fill percentage is clamped between 0.0 and 1.0, and over-quota is always warn."""
         usage = {'five_hour': {'utilization': 150, 'resets_at': '2026-01-01T05:00:00Z'}}
         result = _popup_data(_monitors(_snap(usage=usage)), installations=[])
-        bar = result['usage_groups'][0]['bars'][0]
+        bar = result['accounts'][0]['bars'][0]
         self.assertEqual(bar['fill_pct'], 1.0)
         self.assertTrue(bar['warn'])
 
@@ -328,7 +326,7 @@ class TestPopupData(unittest.TestCase):
         usage = {'five_hour': {'utilization': 0, 'resets_at': '2026-01-01T05:00:00Z'}}
         result = _popup_data(_monitors(_snap(usage=usage)), installations=[])
         # utilization 0 is falsy, so `or 0` kicks in - entry is still shown
-        bar = result['usage_groups'][0]['bars'][0]
+        bar = result['accounts'][0]['bars'][0]
         self.assertEqual(bar['pct_text'], '0%')
         self.assertAlmostEqual(bar['fill_pct'], 0.0)
 
@@ -343,8 +341,8 @@ class TestPopupData(unittest.TestCase):
             'seven_day_sonnet': {'utilization': 30, 'resets_at': '2026-01-07T00:00:00Z'},
         }
         result = _popup_data(_monitors(_snap(usage=usage)), installations=[])
-        self.assertEqual(len(result['usage_groups']), 3)
-        pcts = [group['bars'][0]['pct_text'] for group in result['usage_groups']]
+        self.assertEqual(len(result['accounts'][0]['bars']), 3)
+        pcts = [bar['pct_text'] for bar in result['accounts'][0]['bars']]
         self.assertEqual(pcts, ['10%', '20%', '30%'])
 
     @patch('usage_monitor_for_claude.popup.elapsed_pct', return_value=None)
@@ -357,7 +355,7 @@ class TestPopupData(unittest.TestCase):
             'seven_day_opus': {'utilization': 30, 'resets_at': '2026-01-07T00:00:00Z'},
         }
         result = _popup_data(_monitors(_snap(usage=usage)), installations=[])
-        keys = [group['key'] for group in result['usage_groups']]
+        keys = [bar['key'] for bar in result['accounts'][0]['bars']]
         self.assertEqual(keys, ['five_hour', 'seven_day_opus'])
 
     @patch('usage_monitor_for_claude.popup.POPUP_FIELDS', ['typo_field', 'seven_day'])
@@ -371,14 +369,14 @@ class TestPopupData(unittest.TestCase):
             'seven_day': {'utilization': 20, 'resets_at': '2026-01-07T00:00:00Z'},
         }
         result = _popup_data(_monitors(_snap(usage=usage)), installations=[])
-        self.assertEqual(len(result['usage_groups']), 1)
-        self.assertEqual(result['usage_groups'][0]['bars'][0]['pct_text'], '20%')
+        self.assertEqual(len(result['accounts'][0]['bars']), 1)
+        self.assertEqual(result['accounts'][0]['bars'][0]['pct_text'], '20%')
 
     def test_all_null_fields_no_bars(self):
         """All-null quota fields produce no usage groups."""
         usage = {'five_hour': None, 'seven_day': None, 'seven_day_sonnet': None}
         result = _popup_data(_monitors(_snap(usage=usage)), installations=[])
-        self.assertEqual(result['usage_groups'], [])
+        self.assertEqual(result['accounts'][0]['bars'], [])
 
     @patch('usage_monitor_for_claude.popup.elapsed_pct', return_value=None)
     @patch('usage_monitor_for_claude.popup.time_until', return_value='')
@@ -391,34 +389,34 @@ class TestPopupData(unittest.TestCase):
             'five_hour': {'utilization': 42, 'resets_at': '2026-01-01T05:00:00Z'},
         }
         result = _popup_data(_monitors(_snap(usage=usage)), installations=[])
-        self.assertEqual(len(result['usage_groups']), 1)
-        self.assertEqual(result['usage_groups'][0]['bars'][0]['pct_text'], '42%')
+        self.assertEqual(len(result['accounts'][0]['bars']), 1)
+        self.assertEqual(result['accounts'][0]['bars'][0]['pct_text'], '42%')
 
     # -- extra usage --
 
     def test_no_extra_usage(self):
         """Extra is empty when no extra_usage key in usage dict."""
         result = _popup_data(_monitors(_snap()), installations=[])
-        self.assertEqual(result['extra'], [])
+        self.assertIsNone(result['accounts'][0]['extra'])
 
     def test_extra_usage_disabled(self):
         """Extra is empty when extra usage is not enabled."""
         usage = {'extra_usage': {'is_enabled': False, 'monthly_limit': 1000, 'used_credits': 500}}
         result = _popup_data(_monitors(_snap(usage=usage)), installations=[])
-        self.assertEqual(result['extra'], [])
+        self.assertIsNone(result['accounts'][0]['extra'])
 
     def test_extra_usage_enabled_no_used_credits_key(self):
         """Extra is empty when used_credits is absent, even if enabled."""
         usage = {'extra_usage': {'is_enabled': True, 'monthly_limit': 1000}}
         result = _popup_data(_monitors(_snap(usage=usage)), installations=[])
-        self.assertEqual(result['extra'], [])
+        self.assertIsNone(result['accounts'][0]['extra'])
 
     @patch('usage_monitor_for_claude.popup.format_credits', side_effect=lambda c, *_: f'${c / 100:.2f}')
     def test_extra_usage_zero_limit_shows_no_cap_variant(self, _mock_credits):
         """A zero monthly limit shows the no-cap spent text instead of hiding the section."""
         usage = {'extra_usage': {'is_enabled': True, 'monthly_limit': 0, 'used_credits': 0}}
         result = _popup_data(_monitors(_snap(usage=usage)), installations=[])
-        extra = result['extra'][0]
+        extra = result['accounts'][0]['extra']
         self.assertFalse(extra['has_limit'])
         self.assertEqual(extra['pct_text'], '')
         self.assertIn('$0.00', extra['spent_text'])
@@ -428,7 +426,7 @@ class TestPopupData(unittest.TestCase):
         """A null monthly_limit (uncapped pay-as-you-go credits) shows what has been spent."""
         usage = {'extra_usage': {'is_enabled': True, 'monthly_limit': None, 'used_credits': 2981}}
         result = _popup_data(_monitors(_snap(usage=usage)), installations=[])
-        extra = result['extra'][0]
+        extra = result['accounts'][0]['extra']
         self.assertFalse(extra['has_limit'])
         self.assertIn('$29.81', extra['spent_text'])
 
@@ -438,7 +436,7 @@ class TestPopupData(unittest.TestCase):
         usage = {'extra_usage': {'is_enabled': True, 'monthly_limit': 10000, 'used_credits': 2500}}
         result = _popup_data(_monitors(_snap(usage=usage)), installations=[])
 
-        extra = result['extra'][0]
+        extra = result['accounts'][0]['extra']
         self.assertEqual(extra['account_index'], 0)
         self.assertTrue(extra['has_limit'])
         self.assertEqual(extra['pct_text'], '25%')
@@ -451,7 +449,7 @@ class TestPopupData(unittest.TestCase):
         """Extra usage fill is clamped to 1.0 when over limit."""
         usage = {'extra_usage': {'is_enabled': True, 'monthly_limit': 1000, 'used_credits': 2000}}
         result = _popup_data(_monitors(_snap(usage=usage)), installations=[])
-        self.assertEqual(result['extra'][0]['fill_pct'], 1.0)
+        self.assertEqual(result['accounts'][0]['extra']['fill_pct'], 1.0)
 
     # -- prepaid balance --
 
@@ -465,7 +463,7 @@ class TestPopupData(unittest.TestCase):
 
         result = _popup_data(_monitors(_snap(usage=usage, prepaid=prepaid)), installations=[])
 
-        self.assertEqual(result['extra'][0]['balance_text'], T['extra_usage_balance'].format(balance='$55.97'))
+        self.assertEqual(result['accounts'][0]['extra']['balance_text'], T['extra_usage_balance'].format(balance='$55.97'))
 
     @patch('usage_monitor_for_claude.popup.format_credits', side_effect=lambda c, *_: f'${c / 100:.2f}')
     def test_prepaid_balance_rendered_without_limit(self, _mock_credits):
@@ -477,7 +475,7 @@ class TestPopupData(unittest.TestCase):
 
         result = _popup_data(_monitors(_snap(usage=usage, prepaid=prepaid)), installations=[])
 
-        self.assertEqual(result['extra'][0]['balance_text'], T['extra_usage_balance'].format(balance='$55.97'))
+        self.assertEqual(result['accounts'][0]['extra']['balance_text'], T['extra_usage_balance'].format(balance='$55.97'))
 
     @patch('usage_monitor_for_claude.popup.format_credits', side_effect=lambda c, *_: f'${c / 100:.2f}')
     def test_zero_prepaid_balance_rendered(self, _mock_credits):
@@ -488,7 +486,7 @@ class TestPopupData(unittest.TestCase):
 
         result = _popup_data(_monitors(_snap(usage=usage, prepaid={'amount_minor': 0})), installations=[])
 
-        self.assertEqual(result['extra'][0]['balance_text'], T['extra_usage_balance'].format(balance='$0.00'))
+        self.assertEqual(result['accounts'][0]['extra']['balance_text'], T['extra_usage_balance'].format(balance='$0.00'))
 
     @patch('usage_monitor_for_claude.popup.format_credits', side_effect=lambda c, *_: f'${c / 100:.2f}')
     def test_missing_prepaid_balance_renders_empty(self, _mock_credits):
@@ -498,7 +496,7 @@ class TestPopupData(unittest.TestCase):
         for prepaid in (None, {}, {'amount_minor': None}):
             with self.subTest(prepaid=prepaid):
                 result = _popup_data(_monitors(_snap(usage=usage, prepaid=prepaid)), installations=[])
-                self.assertEqual(result['extra'][0]['balance_text'], '')
+                self.assertEqual(result['accounts'][0]['extra']['balance_text'], '')
 
     def test_prepaid_balance_without_extra_usage_shows_nothing(self):
         """The balance line lives in the extra-usage section, so it needs that section."""
@@ -506,7 +504,7 @@ class TestPopupData(unittest.TestCase):
 
         result = _popup_data(_monitors(_snap(prepaid=prepaid)), installations=[])
 
-        self.assertEqual(result['extra'], [])
+        self.assertIsNone(result['accounts'][0]['extra'])
 
     # -- installations --
 
@@ -576,9 +574,9 @@ class TestPopupData(unittest.TestCase):
     # -- top-level dict structure --
 
     def test_all_top_level_keys_present(self):
-        """Result always has accounts, usage_groups, extra, installations, status."""
+        """Result always has accounts, installations, status."""
         result = _popup_data(_monitors(_snap()), installations=[])
-        self.assertEqual(set(result.keys()), {'accounts', 'usage_groups', 'extra', 'installations', 'status'})
+        self.assertEqual(set(result.keys()), {'accounts', 'installations', 'status'})
 
 
 # ---------------------------------------------------------------------------
@@ -590,12 +588,13 @@ class TestPopupDataMultiAccount(unittest.TestCase):
     _A = {'five_hour': {'utilization': 40, 'resets_at': None}, 'seven_day': {'utilization': 10, 'resets_at': None}}
     _B = {'five_hour': {'utilization': 70, 'resets_at': None}, 'seven_day_fable': {'utilization': 5, 'resets_at': None}}
 
-    def test_groups_are_the_union_of_fields_with_one_bar_per_reporting_account(self):
+    def test_each_account_carries_only_its_own_fields(self):
         result = _popup_data(_monitors(_snap(usage=self._A), _snap(usage=self._B)), installations=[])
-        groups = {group['key']: [bar['account_index'] for bar in group['bars']] for group in result['usage_groups']}
-        self.assertEqual(groups['five_hour'], [0, 1])
-        self.assertEqual(groups['seven_day'], [0])
-        self.assertEqual(groups['seven_day_fable'], [1])
+        acct0, acct1 = result['accounts']
+        self.assertEqual({bar['key'] for bar in acct0['bars']}, {'five_hour', 'seven_day'})
+        self.assertEqual({bar['key'] for bar in acct1['bars']}, {'five_hour', 'seven_day_fable'})
+        self.assertTrue(all(bar['account_index'] == 0 for bar in acct0['bars']))
+        self.assertTrue(all(bar['account_index'] == 1 for bar in acct1['bars']))
 
     def test_accounts_listed_in_launch_order_with_labels(self):
         result = _popup_data(_monitors(_snap(usage=self._A), _snap(usage=self._B)), installations=[])
@@ -626,7 +625,8 @@ class TestPopupDataMultiAccount(unittest.TestCase):
     def test_extra_usage_is_per_account(self):
         extra = {'is_enabled': True, 'used_credits': 500, 'monthly_limit': 2000, 'currency': 'USD', 'decimal_places': 2}
         result = _popup_data(_monitors(_snap(usage={**self._A, 'extra_usage': extra}), _snap(usage=self._B)), installations=[])
-        self.assertEqual([entry['account_index'] for entry in result['extra']], [0])
+        self.assertEqual(result['accounts'][0]['extra']['account_index'], 0)
+        self.assertIsNone(result['accounts'][1]['extra'])
 
 
 # ---------------------------------------------------------------------------
@@ -701,7 +701,7 @@ class TestInitConfig(unittest.TestCase):
         monitors = _monitors(_snap(profile={'account': {'email': 'a@b.com'}, 'organization': {}}))
         config = _init_config(monitors)
         self.assertEqual(config['data']['accounts'][0]['email'], 'a@b.com')
-        self.assertEqual(set(config['data'].keys()), {'accounts', 'usage_groups', 'extra', 'installations', 'status'})
+        self.assertEqual(set(config['data'].keys()), {'accounts', 'installations', 'status'})
 
 
 # ---------------------------------------------------------------------------
