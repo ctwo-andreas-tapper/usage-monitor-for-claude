@@ -6,11 +6,10 @@ Centralizes all user-tunable constants.  Structural constants (API URLs,
 registry keys, file paths) remain in their respective modules.
 
 Loads an optional ``usage-monitor-settings.json`` to let users override
-any constant.  Search order:
+any constant.  One file serves every monitored account.  Search order:
 
-1. ``$CLAUDE_CONFIG_DIR/usage-monitor-settings.json`` (if set and different from ``~/.claude/``)
-2. Next to the executable (frozen) or project root (source)
-3. ``~/.claude/usage-monitor-settings.json``
+1. Next to the executable (frozen) or project root (source)
+2. ``~/.claude/usage-monitor-settings.json``
 
 The app never creates this file - users place it manually.
 """
@@ -21,7 +20,6 @@ import locale as _locale
 import sys
 from pathlib import Path
 
-from .instance_id import effective_config_dir, is_default_config_dir
 from .platforms import show_warning_box, system_time_format
 
 __all__ = [
@@ -32,7 +30,7 @@ __all__ = [
     'ICON_DARK', 'ICON_FIELDS', 'ICON_LIGHT', 'ICON_STYLE', 'IDLE_INTERVAL', 'IDLE_PAUSE',
     'LANGUAGE', 'MAX_BACKOFF', 'NOTIFY_CLAUDE_UPDATE',
     'ON_RESET_COMMAND', 'ON_STARTUP_COMMAND', 'ON_THRESHOLD_COMMAND', 'QUICK_ACTION_COMMAND',
-    'POLL_ERROR', 'POLL_FAST', 'POLL_FAST_EXTRA', 'POLL_INTERVAL',
+    'POLL_ERROR', 'POLL_FAST', 'POLL_FAST_EXTRA', 'POLL_INTERVAL', 'POLL_STAGGER',
     'POPUP_FIELDS', 'SETTINGS_FILENAME', 'TIME_FORMAT', 'TOOLTIP_FIELDS',
     'get_alert_thresholds',
 ]
@@ -44,6 +42,7 @@ _NUMERIC_BOUNDS: dict[str, int] = {
     'poll_fast': 1,
     'poll_fast_extra': 1,
     'poll_error': 1,
+    'poll_stagger': 0,
     'max_backoff': 1,
     'idle_pause': 0,
     'idle_interval': 1,
@@ -88,13 +87,7 @@ def _load_settings() -> dict:
 
     home_claude = Path.home() / '.claude'
 
-    # A custom config dir takes precedence over the exe-adjacent file so
-    # each instance (one per Claude account) can have its own settings.
-    search_paths = []
-    if not is_default_config_dir():
-        search_paths.append(effective_config_dir() / SETTINGS_FILENAME)
-    search_paths.append(app_dir / SETTINGS_FILENAME)
-    search_paths.append(home_claude / SETTINGS_FILENAME)
+    search_paths = [app_dir / SETTINGS_FILENAME, home_claude / SETTINGS_FILENAME]
 
     for path in search_paths:
         if path.is_file():
@@ -326,6 +319,7 @@ POLL_INTERVAL = _S.get('poll_interval', 180)
 POLL_FAST = _S.get('poll_fast', 120)
 POLL_FAST_EXTRA = _S.get('poll_fast_extra', 2)
 POLL_ERROR = _S.get('poll_error', 30)
+POLL_STAGGER = _S.get('poll_stagger', 5)
 MAX_BACKOFF = _S.get('max_backoff', 900)
 IDLE_PAUSE = _S.get('idle_pause', 300)
 IDLE_INTERVAL = _S.get('idle_interval', 900)

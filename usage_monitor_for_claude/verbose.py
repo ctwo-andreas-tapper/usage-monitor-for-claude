@@ -15,12 +15,15 @@ import locale
 import os
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from .instance_id import CONFIG_DIR_SEPARATOR, LAUNCH_CONFIG_DIRS_ENV
 from .platforms import (
     DIAGNOSTIC_PACKAGES, diagnostic_display_rows, diagnostic_post_init_rows,
     diagnostic_runtime_rows, diagnostic_system_rows, setup_console,
 )
+
+if TYPE_CHECKING:
+    from .account import Account
 
 __all__ = ['setup_console', 'print_startup_diagnostics', 'print_runtime_diagnostics']
 
@@ -64,16 +67,15 @@ def _redact_home(path_str: str) -> str:
     return path_str
 
 
-def _credentials_status() -> str:
-    """Check if the credentials file exists (never reads its content)."""
-    config_dir = Path(os.environ.get('CLAUDE_CONFIG_DIR', '')) if os.environ.get('CLAUDE_CONFIG_DIR') else Path.home() / '.claude'
-    cred_path = config_dir / '.credentials.json'
-    display_path = _redact_home(str(cred_path))
+def _credentials_status(accounts: list[Account]) -> list[str]:
+    """Return one ``[label] found|NOT FOUND (path)`` line per account (never reads the content)."""
+    lines = []
+    for account in accounts:
+        display_path = _redact_home(str(account.credentials_path))
+        state = 'found' if account.credentials_path.exists() else 'NOT FOUND'
+        lines.append(f'[{account.label}] {state} ({display_path})')
 
-    if cred_path.exists():
-        return f'found ({display_path})'
-
-    return f'NOT FOUND ({display_path})'
+    return lines
 
 
 def print_startup_diagnostics() -> None:
@@ -100,10 +102,13 @@ def print_startup_diagnostics() -> None:
     _row('System locale', f'{sys_locale[0]}, {sys_locale[1]}' if sys_locale[0] else 'not set')
     _row('Filesystem encoding', sys.getfilesystemencoding())
     _row('Default encoding', sys.getdefaultencoding())
-    _row('CLAUDE_CONFIG_DIR', _redact_home(os.environ.get('CLAUDE_CONFIG_DIR', '')) or '(not set)')
-    launch_set = os.environ.get(LAUNCH_CONFIG_DIRS_ENV, '')
-    if launch_set:
-        _row('Account set', CONFIG_DIR_SEPARATOR.join(_redact_home(entry) for entry in launch_set.split(CONFIG_DIR_SEPARATOR)))
+
+    from .account import accounts_from_config_dirs
+    from .instance_id import resolve_config_dirs
+    accounts = accounts_from_config_dirs(resolve_config_dirs())
+    _section('Accounts')
+    for account in accounts:
+        _row(account.label, _redact_home(str(account.config_dir)))
 
     _section('Display')
     for label, value in diagnostic_display_rows():
@@ -118,7 +123,8 @@ def print_startup_diagnostics() -> None:
         _row(package, _package_version(package))
 
     _section('Credentials')
-    _row('File', _credentials_status())
+    for line in _credentials_status(accounts):
+        _row('File', line)
 
     print()
 

@@ -2,7 +2,7 @@
 Popup Tests
 =============
 
-Unit tests for popup data helpers: _usage_entries, _snapshot_to_dict,
+Unit tests for popup data helpers: _usage_entries, _popup_data,
 and _init_config.
 """
 from __future__ import annotations
@@ -10,10 +10,12 @@ from __future__ import annotations
 import threading
 import time
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from usage_monitor_for_claude.account import Account
 from usage_monitor_for_claude.cache import CacheSnapshot
-from usage_monitor_for_claude.popup import UsagePopup, _init_config, _snapshot_to_dict, _usage_entries
+from usage_monitor_for_claude.popup import UsagePopup, _init_config, _popup_data, _usage_entries
 
 
 def _snap(
@@ -30,6 +32,17 @@ def _snap(
         last_error=last_error,
         version=version,
     )
+
+
+class _FakeMonitor:
+    def __init__(self, snap: CacheSnapshot, label: str = 'a', next_poll_time: float | None = None) -> None:
+        self.account = Account(Path(f'/claude/{label}'), label)
+        self.cache = MagicMock(snapshot=snap)
+        self._next_poll_time = next_poll_time
+
+
+def _monitors(*snaps: CacheSnapshot) -> list[_FakeMonitor]:
+    return [_FakeMonitor(snap, label=chr(ord('a') + index)) for index, snap in enumerate(snaps)]
 
 
 # ---------------------------------------------------------------------------
@@ -150,18 +163,19 @@ class TestUsageEntries(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# _snapshot_to_dict
+# _popup_data
 # ---------------------------------------------------------------------------
 
-class TestSnapshotToDict(unittest.TestCase):
-    """Tests for _snapshot_to_dict - converts CacheSnapshot to popup JSON."""
+class TestPopupData(unittest.TestCase):
+    """Tests for _popup_data - converts one account's snapshot to popup JSON."""
 
-    # -- profile --
+    # -- account row (former profile) --
 
     def test_no_profile(self):
-        """Profile is None when snapshot has no profile."""
-        result = _snapshot_to_dict(_snap(), installations=[])
-        self.assertIsNone(result['profile'])
+        """Account row has empty email/plan when snapshot has no profile."""
+        result = _popup_data(_monitors(_snap()), installations=[])
+        self.assertEqual(result['accounts'][0]['email'], '')
+        self.assertEqual(result['accounts'][0]['plan'], '')
 
     def test_profile_extraction(self):
         """Email and plan are extracted from nested account/organization dicts."""
@@ -169,45 +183,46 @@ class TestSnapshotToDict(unittest.TestCase):
             'account': {'email': 'test@example.com'},
             'organization': {'organization_type': 'pro_team'},
         }
-        result = _snapshot_to_dict(_snap(profile=profile), installations=[])
-        self.assertEqual(result['profile']['email'], 'test@example.com')
-        self.assertEqual(result['profile']['plan'], 'Pro Team')
+        result = _popup_data(_monitors(_snap(profile=profile)), installations=[])
+        self.assertEqual(result['accounts'][0]['email'], 'test@example.com')
+        self.assertEqual(result['accounts'][0]['plan'], 'Pro Team')
 
     def test_empty_profile_hidden(self):
-        """Empty profile dict from API is treated as absent (no broken UI)."""
-        result = _snapshot_to_dict(_snap(profile={}), installations=[])
-        self.assertIsNone(result['profile'])
+        """Empty profile dict from API leaves email/plan empty (no broken UI)."""
+        result = _popup_data(_monitors(_snap(profile={})), installations=[])
+        self.assertEqual(result['accounts'][0]['email'], '')
+        self.assertEqual(result['accounts'][0]['plan'], '')
 
     def test_profile_missing_nested_keys(self):
         """Present but incomplete profile defaults missing fields to empty strings."""
-        result = _snapshot_to_dict(_snap(profile={'account': {}}), installations=[])
-        self.assertEqual(result['profile']['email'], '')
-        self.assertEqual(result['profile']['plan'], '')
+        result = _popup_data(_monitors(_snap(profile={'account': {}})), installations=[])
+        self.assertEqual(result['accounts'][0]['email'], '')
+        self.assertEqual(result['accounts'][0]['plan'], '')
 
     def test_profile_with_null_account_and_organization(self):
         """A profile carrying account/organization as null must not crash the popup."""
-        result = _snapshot_to_dict(_snap(profile={'account': None, 'organization': None}), installations=[])
-        self.assertEqual(result['profile']['email'], '')
-        self.assertEqual(result['profile']['plan'], '')
+        result = _popup_data(_monitors(_snap(profile={'account': None, 'organization': None})), installations=[])
+        self.assertEqual(result['accounts'][0]['email'], '')
+        self.assertEqual(result['accounts'][0]['plan'], '')
 
     # -- usage bars --
 
     def test_no_usage_data(self):
-        """Empty usage dict produces empty usage list."""
-        result = _snapshot_to_dict(_snap(), installations=[])
-        self.assertEqual(result['usage'], [])
+        """Empty usage dict produces an empty bars list on the account."""
+        result = _popup_data(_monitors(_snap()), installations=[])
+        self.assertEqual(result['accounts'][0]['bars'], [])
 
     def test_skips_entries_without_utilization(self):
         """Entries with None utilization are omitted."""
         usage = {'five_hour': {'utilization': None}}
-        result = _snapshot_to_dict(_snap(usage=usage), installations=[])
-        self.assertEqual(result['usage'], [])
+        result = _popup_data(_monitors(_snap(usage=usage)), installations=[])
+        self.assertEqual(result['accounts'][0]['bars'], [])
 
     def test_skips_missing_entries(self):
         """Missing usage keys produce no bar entries."""
         usage = {'five_hour': None}
-        result = _snapshot_to_dict(_snap(usage=usage), installations=[])
-        self.assertEqual(result['usage'], [])
+        result = _popup_data(_monitors(_snap(usage=usage)), installations=[])
+        self.assertEqual(result['accounts'][0]['bars'], [])
 
     @patch('usage_monitor_for_claude.popup.elapsed_pct', return_value=None)
     @patch('usage_monitor_for_claude.popup.time_until', return_value='5h 0m')
@@ -215,10 +230,11 @@ class TestSnapshotToDict(unittest.TestCase):
     def test_usage_bar_fields(self, _mock_dividers, _mock_time_until, _mock_elapsed):
         """Each usage bar dict has all required fields with correct types."""
         usage = {'five_hour': {'utilization': 42, 'resets_at': '2026-01-01T05:00:00Z'}}
-        result = _snapshot_to_dict(_snap(usage=usage), installations=[])
+        result = _popup_data(_monitors(_snap(usage=usage)), installations=[])
 
-        self.assertEqual(len(result['usage']), 1)
-        bar = result['usage'][0]
+        self.assertEqual(len(result['accounts'][0]['bars']), 1)
+        bar = result['accounts'][0]['bars'][0]
+        self.assertEqual(bar['account_index'], 0)
         self.assertEqual(bar['pct_text'], '42%')
         self.assertAlmostEqual(bar['fill_pct'], 0.42)
         self.assertFalse(bar['warn'])
@@ -229,10 +245,10 @@ class TestSnapshotToDict(unittest.TestCase):
     def test_field_with_null_resets_at(self):
         """An inactive scoped limit (resets_at None) renders a 0% bar with no reset text."""
         usage = {'seven_day_fable': {'utilization': 0.0, 'resets_at': None}}
-        result = _snapshot_to_dict(_snap(usage=usage), installations=[])
+        result = _popup_data(_monitors(_snap(usage=usage)), installations=[])
 
-        self.assertEqual(len(result['usage']), 1)
-        bar = result['usage'][0]
+        self.assertEqual(len(result['accounts'][0]['bars']), 1)
+        bar = result['accounts'][0]['bars'][0]
         self.assertEqual(bar['key'], 'seven_day_fable')
         self.assertEqual(bar['pct_text'], '0%')
         self.assertEqual(bar['fill_pct'], 0.0)
@@ -247,9 +263,9 @@ class TestSnapshotToDict(unittest.TestCase):
     def test_warn_when_usage_ahead_of_time(self, _mock_dividers, _mock_time_until, _mock_elapsed):
         """Bar is marked warn when utilization exceeds elapsed percentage."""
         usage = {'five_hour': {'utilization': 60, 'resets_at': '2026-01-01T05:00:00Z'}}
-        result = _snapshot_to_dict(_snap(usage=usage), installations=[])
+        result = _popup_data(_monitors(_snap(usage=usage)), installations=[])
 
-        bar = result['usage'][0]
+        bar = result['accounts'][0]['bars'][0]
         self.assertTrue(bar['warn'])
         self.assertAlmostEqual(bar['marker_rel'], 0.3)
 
@@ -259,9 +275,9 @@ class TestSnapshotToDict(unittest.TestCase):
     def test_no_warn_when_usage_behind_time(self, _mock_dividers, _mock_time_until, _mock_elapsed):
         """Bar is not warn when utilization is below elapsed percentage."""
         usage = {'five_hour': {'utilization': 40, 'resets_at': '2026-01-01T05:00:00Z'}}
-        result = _snapshot_to_dict(_snap(usage=usage), installations=[])
+        result = _popup_data(_monitors(_snap(usage=usage)), installations=[])
 
-        bar = result['usage'][0]
+        bar = result['accounts'][0]['bars'][0]
         self.assertFalse(bar['warn'])
 
     @patch('usage_monitor_for_claude.popup.elapsed_pct', return_value=50.0)
@@ -270,8 +286,8 @@ class TestSnapshotToDict(unittest.TestCase):
     def test_no_warn_when_equal(self, _mock_dividers, _mock_time_until, _mock_elapsed):
         """Exactly equal usage and elapsed is not a warning (strictly greater)."""
         usage = {'five_hour': {'utilization': 50, 'resets_at': '2026-01-01T05:00:00Z'}}
-        result = _snapshot_to_dict(_snap(usage=usage), installations=[])
-        self.assertFalse(result['usage'][0]['warn'])
+        result = _popup_data(_monitors(_snap(usage=usage)), installations=[])
+        self.assertFalse(result['accounts'][0]['bars'][0]['warn'])
 
     @patch('usage_monitor_for_claude.popup.elapsed_pct', return_value=None)
     @patch('usage_monitor_for_claude.popup.time_until', return_value='')
@@ -279,8 +295,8 @@ class TestSnapshotToDict(unittest.TestCase):
     def test_warn_at_100_without_time_period(self, _mock_dividers, _mock_time_until, _mock_elapsed):
         """Bar at 100% is warn even when no time period (time_pct is None)."""
         usage = {'five_hour': {'utilization': 100, 'resets_at': ''}}
-        result = _snapshot_to_dict(_snap(usage=usage), installations=[])
-        self.assertTrue(result['usage'][0]['warn'])
+        result = _popup_data(_monitors(_snap(usage=usage)), installations=[])
+        self.assertTrue(result['accounts'][0]['bars'][0]['warn'])
 
     @patch('usage_monitor_for_claude.popup.elapsed_pct', return_value=100.0)
     @patch('usage_monitor_for_claude.popup.time_until', return_value='')
@@ -288,8 +304,8 @@ class TestSnapshotToDict(unittest.TestCase):
     def test_warn_at_100_when_time_also_100(self, _mock_dividers, _mock_time_until, _mock_elapsed):
         """Bar at 100% is warn even when elapsed time is also 100% (strict > would miss this)."""
         usage = {'five_hour': {'utilization': 100, 'resets_at': '2026-01-01T05:00:00Z'}}
-        result = _snapshot_to_dict(_snap(usage=usage), installations=[])
-        self.assertTrue(result['usage'][0]['warn'])
+        result = _popup_data(_monitors(_snap(usage=usage)), installations=[])
+        self.assertTrue(result['accounts'][0]['bars'][0]['warn'])
 
     @patch('usage_monitor_for_claude.popup.elapsed_pct', return_value=None)
     @patch('usage_monitor_for_claude.popup.time_until', return_value='')
@@ -297,9 +313,10 @@ class TestSnapshotToDict(unittest.TestCase):
     def test_fill_pct_clamped_to_0_1(self, _mock_dividers, _mock_time_until, _mock_elapsed):
         """Fill percentage is clamped between 0.0 and 1.0, and over-quota is always warn."""
         usage = {'five_hour': {'utilization': 150, 'resets_at': '2026-01-01T05:00:00Z'}}
-        result = _snapshot_to_dict(_snap(usage=usage), installations=[])
-        self.assertEqual(result['usage'][0]['fill_pct'], 1.0)
-        self.assertTrue(result['usage'][0]['warn'])
+        result = _popup_data(_monitors(_snap(usage=usage)), installations=[])
+        bar = result['accounts'][0]['bars'][0]
+        self.assertEqual(bar['fill_pct'], 1.0)
+        self.assertTrue(bar['warn'])
 
     @patch('usage_monitor_for_claude.popup.elapsed_pct', return_value=None)
     @patch('usage_monitor_for_claude.popup.time_until', return_value='')
@@ -307,9 +324,9 @@ class TestSnapshotToDict(unittest.TestCase):
     def test_zero_utilization(self, _mock_dividers, _mock_time_until, _mock_elapsed):
         """Zero utilization produces 0% text and 0.0 fill."""
         usage = {'five_hour': {'utilization': 0, 'resets_at': '2026-01-01T05:00:00Z'}}
-        result = _snapshot_to_dict(_snap(usage=usage), installations=[])
+        result = _popup_data(_monitors(_snap(usage=usage)), installations=[])
         # utilization 0 is falsy, so `or 0` kicks in - entry is still shown
-        bar = result['usage'][0]
+        bar = result['accounts'][0]['bars'][0]
         self.assertEqual(bar['pct_text'], '0%')
         self.assertAlmostEqual(bar['fill_pct'], 0.0)
 
@@ -317,28 +334,28 @@ class TestSnapshotToDict(unittest.TestCase):
     @patch('usage_monitor_for_claude.popup.time_until', return_value='')
     @patch('usage_monitor_for_claude.popup.divider_positions', return_value=[])
     def test_multiple_usage_entries(self, _mock_dividers, _mock_time_until, _mock_elapsed):
-        """Multiple usage types each produce a bar entry."""
+        """Multiple usage types each produce a group with one bar."""
         usage = {
             'five_hour': {'utilization': 10, 'resets_at': '2026-01-01T05:00:00Z'},
             'seven_day': {'utilization': 20, 'resets_at': '2026-01-07T00:00:00Z'},
             'seven_day_sonnet': {'utilization': 30, 'resets_at': '2026-01-07T00:00:00Z'},
         }
-        result = _snapshot_to_dict(_snap(usage=usage), installations=[])
-        self.assertEqual(len(result['usage']), 3)
-        pcts = [b['pct_text'] for b in result['usage']]
+        result = _popup_data(_monitors(_snap(usage=usage)), installations=[])
+        self.assertEqual(len(result['accounts'][0]['bars']), 3)
+        pcts = [bar['pct_text'] for bar in result['accounts'][0]['bars']]
         self.assertEqual(pcts, ['10%', '20%', '30%'])
 
     @patch('usage_monitor_for_claude.popup.elapsed_pct', return_value=None)
     @patch('usage_monitor_for_claude.popup.time_until', return_value='')
     @patch('usage_monitor_for_claude.popup.divider_positions', return_value=[])
     def test_usage_bar_includes_field_key(self, _mock_div, _mock_tu, _mock_ep):
-        """Each usage bar dict carries its API field name for compact hiding."""
+        """Each usage group carries its API field name for compact hiding."""
         usage = {
             'five_hour': {'utilization': 10, 'resets_at': '2026-01-01T05:00:00Z'},
             'seven_day_opus': {'utilization': 30, 'resets_at': '2026-01-07T00:00:00Z'},
         }
-        result = _snapshot_to_dict(_snap(usage=usage), installations=[])
-        keys = [bar['key'] for bar in result['usage']]
+        result = _popup_data(_monitors(_snap(usage=usage)), installations=[])
+        keys = [bar['key'] for bar in result['accounts'][0]['bars']]
         self.assertEqual(keys, ['five_hour', 'seven_day_opus'])
 
     @patch('usage_monitor_for_claude.popup.POPUP_FIELDS', ['typo_field', 'seven_day'])
@@ -351,15 +368,15 @@ class TestSnapshotToDict(unittest.TestCase):
             'five_hour': {'utilization': 42, 'resets_at': '2026-01-01T05:00:00Z'},
             'seven_day': {'utilization': 20, 'resets_at': '2026-01-07T00:00:00Z'},
         }
-        result = _snapshot_to_dict(_snap(usage=usage), installations=[])
-        self.assertEqual(len(result['usage']), 1)
-        self.assertEqual(result['usage'][0]['pct_text'], '20%')
+        result = _popup_data(_monitors(_snap(usage=usage)), installations=[])
+        self.assertEqual(len(result['accounts'][0]['bars']), 1)
+        self.assertEqual(result['accounts'][0]['bars'][0]['pct_text'], '20%')
 
     def test_all_null_fields_no_bars(self):
-        """All-null quota fields produce no usage bars."""
+        """All-null quota fields produce no usage groups."""
         usage = {'five_hour': None, 'seven_day': None, 'seven_day_sonnet': None}
-        result = _snapshot_to_dict(_snap(usage=usage), installations=[])
-        self.assertEqual(result['usage'], [])
+        result = _popup_data(_monitors(_snap(usage=usage)), installations=[])
+        self.assertEqual(result['accounts'][0]['bars'], [])
 
     @patch('usage_monitor_for_claude.popup.elapsed_pct', return_value=None)
     @patch('usage_monitor_for_claude.popup.time_until', return_value='')
@@ -371,36 +388,35 @@ class TestSnapshotToDict(unittest.TestCase):
             'rate_limited': True,
             'five_hour': {'utilization': 42, 'resets_at': '2026-01-01T05:00:00Z'},
         }
-        result = _snapshot_to_dict(_snap(usage=usage), installations=[])
-        self.assertEqual(len(result['usage']), 1)
-        self.assertEqual(result['usage'][0]['pct_text'], '42%')
+        result = _popup_data(_monitors(_snap(usage=usage)), installations=[])
+        self.assertEqual(len(result['accounts'][0]['bars']), 1)
+        self.assertEqual(result['accounts'][0]['bars'][0]['pct_text'], '42%')
 
     # -- extra usage --
 
     def test_no_extra_usage(self):
-        """Extra is None when no extra_usage key in usage dict."""
-        result = _snapshot_to_dict(_snap(), installations=[])
-        self.assertIsNone(result['extra'])
+        """Extra is empty when no extra_usage key in usage dict."""
+        result = _popup_data(_monitors(_snap()), installations=[])
+        self.assertIsNone(result['accounts'][0]['extra'])
 
     def test_extra_usage_disabled(self):
-        """Extra is None when extra usage is not enabled."""
+        """Extra is empty when extra usage is not enabled."""
         usage = {'extra_usage': {'is_enabled': False, 'monthly_limit': 1000, 'used_credits': 500}}
-        result = _snapshot_to_dict(_snap(usage=usage), installations=[])
-        self.assertIsNone(result['extra'])
+        result = _popup_data(_monitors(_snap(usage=usage)), installations=[])
+        self.assertIsNone(result['accounts'][0]['extra'])
 
     def test_extra_usage_enabled_no_used_credits_key(self):
-        """Extra is None when used_credits is absent, even if enabled."""
+        """Extra is empty when used_credits is absent, even if enabled."""
         usage = {'extra_usage': {'is_enabled': True, 'monthly_limit': 1000}}
-        result = _snapshot_to_dict(_snap(usage=usage), installations=[])
-        self.assertIsNone(result['extra'])
+        result = _popup_data(_monitors(_snap(usage=usage)), installations=[])
+        self.assertIsNone(result['accounts'][0]['extra'])
 
     @patch('usage_monitor_for_claude.popup.format_credits', side_effect=lambda c, *_: f'${c / 100:.2f}')
     def test_extra_usage_zero_limit_shows_no_cap_variant(self, _mock_credits):
         """A zero monthly limit shows the no-cap spent text instead of hiding the section."""
         usage = {'extra_usage': {'is_enabled': True, 'monthly_limit': 0, 'used_credits': 0}}
-        result = _snapshot_to_dict(_snap(usage=usage), installations=[])
-        extra = result['extra']
-        self.assertIsNotNone(extra)
+        result = _popup_data(_monitors(_snap(usage=usage)), installations=[])
+        extra = result['accounts'][0]['extra']
         self.assertFalse(extra['has_limit'])
         self.assertEqual(extra['pct_text'], '')
         self.assertIn('$0.00', extra['spent_text'])
@@ -409,9 +425,8 @@ class TestSnapshotToDict(unittest.TestCase):
     def test_extra_usage_null_limit_shows_no_cap_variant(self, _mock_credits):
         """A null monthly_limit (uncapped pay-as-you-go credits) shows what has been spent."""
         usage = {'extra_usage': {'is_enabled': True, 'monthly_limit': None, 'used_credits': 2981}}
-        result = _snapshot_to_dict(_snap(usage=usage), installations=[])
-        extra = result['extra']
-        self.assertIsNotNone(extra)
+        result = _popup_data(_monitors(_snap(usage=usage)), installations=[])
+        extra = result['accounts'][0]['extra']
         self.assertFalse(extra['has_limit'])
         self.assertIn('$29.81', extra['spent_text'])
 
@@ -419,10 +434,10 @@ class TestSnapshotToDict(unittest.TestCase):
     def test_extra_usage_calculation(self, _mock_credits):
         """Extra usage computes percentage and formatted text correctly."""
         usage = {'extra_usage': {'is_enabled': True, 'monthly_limit': 10000, 'used_credits': 2500}}
-        result = _snapshot_to_dict(_snap(usage=usage), installations=[])
+        result = _popup_data(_monitors(_snap(usage=usage)), installations=[])
 
-        extra = result['extra']
-        self.assertIsNotNone(extra)
+        extra = result['accounts'][0]['extra']
+        self.assertEqual(extra['account_index'], 0)
         self.assertTrue(extra['has_limit'])
         self.assertEqual(extra['pct_text'], '25%')
         self.assertAlmostEqual(extra['fill_pct'], 0.25)
@@ -433,8 +448,8 @@ class TestSnapshotToDict(unittest.TestCase):
     def test_extra_usage_fill_clamped(self, _mock_credits):
         """Extra usage fill is clamped to 1.0 when over limit."""
         usage = {'extra_usage': {'is_enabled': True, 'monthly_limit': 1000, 'used_credits': 2000}}
-        result = _snapshot_to_dict(_snap(usage=usage), installations=[])
-        self.assertEqual(result['extra']['fill_pct'], 1.0)
+        result = _popup_data(_monitors(_snap(usage=usage)), installations=[])
+        self.assertEqual(result['accounts'][0]['extra']['fill_pct'], 1.0)
 
     # -- prepaid balance --
 
@@ -446,9 +461,9 @@ class TestSnapshotToDict(unittest.TestCase):
         usage = {'extra_usage': {'is_enabled': True, 'monthly_limit': 10000, 'used_credits': 2500}}
         prepaid = {'amount_minor': 5597, 'currency': 'EUR', 'decimal_places': 2}
 
-        result = _snapshot_to_dict(_snap(usage=usage, prepaid=prepaid), installations=[])
+        result = _popup_data(_monitors(_snap(usage=usage, prepaid=prepaid)), installations=[])
 
-        self.assertEqual(result['extra']['balance_text'], T['extra_usage_balance'].format(balance='$55.97'))
+        self.assertEqual(result['accounts'][0]['extra']['balance_text'], T['extra_usage_balance'].format(balance='$55.97'))
 
     @patch('usage_monitor_for_claude.popup.format_credits', side_effect=lambda c, *_: f'${c / 100:.2f}')
     def test_prepaid_balance_rendered_without_limit(self, _mock_credits):
@@ -458,9 +473,9 @@ class TestSnapshotToDict(unittest.TestCase):
         usage = {'extra_usage': {'is_enabled': True, 'monthly_limit': None, 'used_credits': 2981}}
         prepaid = {'amount_minor': 5597, 'currency': 'EUR', 'decimal_places': 2}
 
-        result = _snapshot_to_dict(_snap(usage=usage, prepaid=prepaid), installations=[])
+        result = _popup_data(_monitors(_snap(usage=usage, prepaid=prepaid)), installations=[])
 
-        self.assertEqual(result['extra']['balance_text'], T['extra_usage_balance'].format(balance='$55.97'))
+        self.assertEqual(result['accounts'][0]['extra']['balance_text'], T['extra_usage_balance'].format(balance='$55.97'))
 
     @patch('usage_monitor_for_claude.popup.format_credits', side_effect=lambda c, *_: f'${c / 100:.2f}')
     def test_zero_prepaid_balance_rendered(self, _mock_credits):
@@ -469,9 +484,9 @@ class TestSnapshotToDict(unittest.TestCase):
 
         usage = {'extra_usage': {'is_enabled': True, 'monthly_limit': 10000, 'used_credits': 2500}}
 
-        result = _snapshot_to_dict(_snap(usage=usage, prepaid={'amount_minor': 0}), installations=[])
+        result = _popup_data(_monitors(_snap(usage=usage, prepaid={'amount_minor': 0})), installations=[])
 
-        self.assertEqual(result['extra']['balance_text'], T['extra_usage_balance'].format(balance='$0.00'))
+        self.assertEqual(result['accounts'][0]['extra']['balance_text'], T['extra_usage_balance'].format(balance='$0.00'))
 
     @patch('usage_monitor_for_claude.popup.format_credits', side_effect=lambda c, *_: f'${c / 100:.2f}')
     def test_missing_prepaid_balance_renders_empty(self, _mock_credits):
@@ -480,23 +495,23 @@ class TestSnapshotToDict(unittest.TestCase):
 
         for prepaid in (None, {}, {'amount_minor': None}):
             with self.subTest(prepaid=prepaid):
-                result = _snapshot_to_dict(_snap(usage=usage, prepaid=prepaid), installations=[])
-                self.assertEqual(result['extra']['balance_text'], '')
+                result = _popup_data(_monitors(_snap(usage=usage, prepaid=prepaid)), installations=[])
+                self.assertEqual(result['accounts'][0]['extra']['balance_text'], '')
 
     def test_prepaid_balance_without_extra_usage_shows_nothing(self):
         """The balance line lives in the extra-usage section, so it needs that section."""
         prepaid = {'amount_minor': 5597, 'currency': 'EUR', 'decimal_places': 2}
 
-        result = _snapshot_to_dict(_snap(prepaid=prepaid), installations=[])
+        result = _popup_data(_monitors(_snap(prepaid=prepaid)), installations=[])
 
-        self.assertIsNone(result['extra'])
+        self.assertIsNone(result['accounts'][0]['extra'])
 
     # -- installations --
 
     def test_installations_passthrough(self):
         """Pre-computed installations list is passed through unchanged."""
         installs = [{'name': 'VS Code', 'version': '1.0.0'}]
-        result = _snapshot_to_dict(_snap(), installations=installs)
+        result = _popup_data(_monitors(_snap()), installations=installs)
         self.assertEqual(result['installations'], installs)
 
     @patch('usage_monitor_for_claude.popup.find_installations')
@@ -507,7 +522,7 @@ class TestSnapshotToDict(unittest.TestCase):
         inst.version = '2.0.0'
         mock_find.return_value = [inst]
 
-        result = _snapshot_to_dict(_snap(), installations=None)
+        result = _popup_data(_monitors(_snap()), installations=None)
         mock_find.assert_called_once()
         self.assertEqual(result['installations'], [{'name': 'Cursor', 'version': '2.0.0'}])
 
@@ -515,21 +530,21 @@ class TestSnapshotToDict(unittest.TestCase):
 
     def test_status_error_when_no_usage(self):
         """Shows error text when there's no usage data but there's an error."""
-        result = _snapshot_to_dict(_snap(usage={}, last_error='Connection failed'), installations=[])
+        result = _popup_data(_monitors(_snap(usage={}, last_error='Connection failed')), installations=[])
         self.assertEqual(result['status']['text'], 'Connection failed')
         self.assertTrue(result['status']['is_error'])
 
     def test_status_error_truncated(self):
         """Error messages are truncated to 120 characters."""
         long_error = 'x' * 200
-        result = _snapshot_to_dict(_snap(usage={}, last_error=long_error), installations=[])
+        result = _popup_data(_monitors(_snap(usage={}, last_error=long_error)), installations=[])
         self.assertEqual(len(result['status']['text']), 120)
 
     def test_status_refreshing_when_no_usage_no_error(self):
         """Shows refreshing status when no usage data and no error."""
         from usage_monitor_for_claude.i18n import T
 
-        result = _snapshot_to_dict(_snap(usage={}, last_error=None), installations=[])
+        result = _popup_data(_monitors(_snap(usage={}, last_error=None)), installations=[])
         self.assertEqual(result['status']['text'], T['status_refreshing'])
         self.assertFalse(result['status']['is_error'])
 
@@ -539,10 +554,11 @@ class TestSnapshotToDict(unittest.TestCase):
     def test_status_live_mode_keys(self, _mock_div, _mock_tu, _mock_ep):
         """Live mode status contains all required keys for the JS timer."""
         usage = {'five_hour': {'utilization': 50, 'resets_at': '2026-01-01T05:00:00Z'}}
-        result = _snapshot_to_dict(
+        monitor = _FakeMonitor(
             _snap(usage=usage, last_success_time=1000.0, refreshing=True, last_error='Server down'),
-            installations=[], next_poll_time=1180.0,
+            next_poll_time=1180.0,
         )
+        result = _popup_data([monitor], installations=[])
         self.assertEqual(set(result['status'].keys()), {'last_success_time', 'next_poll_time', 'refreshing', 'error'})
 
     @patch('usage_monitor_for_claude.popup.elapsed_pct', return_value=None)
@@ -552,18 +568,65 @@ class TestSnapshotToDict(unittest.TestCase):
         """Error messages are truncated to 120 characters in live mode."""
         usage = {'five_hour': {'utilization': 50, 'resets_at': '2026-01-01T05:00:00Z'}}
         long_error = 'x' * 200
-        result = _snapshot_to_dict(
-            _snap(usage=usage, last_error=long_error),
-            installations=[],
-        )
+        result = _popup_data(_monitors(_snap(usage=usage, last_error=long_error)), installations=[])
         self.assertEqual(len(result['status']['error']), 120)
 
     # -- top-level dict structure --
 
     def test_all_top_level_keys_present(self):
-        """Result always has profile, usage, extra, installations, status."""
-        result = _snapshot_to_dict(_snap(), installations=[])
-        self.assertEqual(set(result.keys()), {'profile', 'usage', 'extra', 'installations', 'status'})
+        """Result always has accounts, installations, status."""
+        result = _popup_data(_monitors(_snap()), installations=[])
+        self.assertEqual(set(result.keys()), {'accounts', 'installations', 'status'})
+
+
+# ---------------------------------------------------------------------------
+# _popup_data - multiple accounts
+# ---------------------------------------------------------------------------
+
+class TestPopupDataMultiAccount(unittest.TestCase):
+
+    _A = {'five_hour': {'utilization': 40, 'resets_at': None}, 'seven_day': {'utilization': 10, 'resets_at': None}}
+    _B = {'five_hour': {'utilization': 70, 'resets_at': None}, 'seven_day_fable': {'utilization': 5, 'resets_at': None}}
+
+    def test_each_account_carries_only_its_own_fields(self):
+        result = _popup_data(_monitors(_snap(usage=self._A), _snap(usage=self._B)), installations=[])
+        acct0, acct1 = result['accounts']
+        self.assertEqual({bar['key'] for bar in acct0['bars']}, {'five_hour', 'seven_day'})
+        self.assertEqual({bar['key'] for bar in acct1['bars']}, {'five_hour', 'seven_day_fable'})
+        self.assertTrue(all(bar['account_index'] == 0 for bar in acct0['bars']))
+        self.assertTrue(all(bar['account_index'] == 1 for bar in acct1['bars']))
+
+    def test_accounts_listed_in_launch_order_with_labels(self):
+        result = _popup_data(_monitors(_snap(usage=self._A), _snap(usage=self._B)), installations=[])
+        self.assertEqual([account['label'] for account in result['accounts']], ['a', 'b'])
+        self.assertEqual([account['index'] for account in result['accounts']], [0, 1])
+
+    def test_account_without_data_reports_its_error_in_its_row(self):
+        result = _popup_data(_monitors(_snap(usage=self._A), _snap(last_error='HTTP 500')), installations=[])
+        self.assertEqual(result['accounts'][1]['error'], 'HTTP 500')
+        self.assertIsNone(result['accounts'][0]['error'])
+
+    def test_status_uses_oldest_success_and_earliest_poll(self):
+        monitors = _monitors(_snap(usage=self._A, last_success_time=200.0), _snap(usage=self._B, last_success_time=100.0))
+        monitors[0]._next_poll_time = 500.0
+        monitors[1]._next_poll_time = 400.0
+        result = _popup_data(monitors, installations=[])
+        self.assertEqual(result['status']['last_success_time'], 100.0)
+        self.assertEqual(result['status']['next_poll_time'], 400.0)
+
+    def test_status_refreshing_if_any_account_refreshing(self):
+        result = _popup_data(_monitors(_snap(usage=self._A), _snap(usage=self._B, refreshing=True)), installations=[])
+        self.assertTrue(result['status']['refreshing'])
+
+    def test_no_data_anywhere_shows_first_error_text(self):
+        result = _popup_data(_monitors(_snap(last_error='boom'), _snap()), installations=[])
+        self.assertEqual(result['status'], {'text': 'boom', 'is_error': True})
+
+    def test_extra_usage_is_per_account(self):
+        extra = {'is_enabled': True, 'used_credits': 500, 'monthly_limit': 2000, 'currency': 'USD', 'decimal_places': 2}
+        result = _popup_data(_monitors(_snap(usage={**self._A, 'extra_usage': extra}), _snap(usage=self._B)), installations=[])
+        self.assertEqual(result['accounts'][0]['extra']['account_index'], 0)
+        self.assertIsNone(result['accounts'][1]['extra'])
 
 
 # ---------------------------------------------------------------------------
@@ -575,20 +638,20 @@ class TestInitConfig(unittest.TestCase):
 
     def test_top_level_keys(self):
         """Config has colors, t (translations), app_version, compact_hide, and data."""
-        config = _init_config(_snap())
+        config = _init_config(_monitors(_snap()))
         self.assertEqual(set(config.keys()), {'colors', 't', 'app_version', 'compact_hide', 'data'})
 
     @patch('usage_monitor_for_claude.popup.COMPACT_HIDE', ['account', 'seven_day_opus'])
     def test_compact_hide_from_settings(self):
         """compact_hide is taken from the COMPACT_HIDE setting."""
-        config = _init_config(_snap())
+        config = _init_config(_monitors(_snap()))
         self.assertEqual(config['compact_hide'], ['account', 'seven_day_opus'])
 
     def test_colors_from_settings(self):
         """Color values come from settings module constants."""
         from usage_monitor_for_claude.settings import BAR_BG, BAR_DIVIDER, BAR_FG, BAR_FG_WARN, BAR_MARKER, BG, FG, FG_DIM, FG_HEADING, FG_LINK
 
-        config = _init_config(_snap())
+        config = _init_config(_monitors(_snap()))
         colors = config['colors']
         self.assertEqual(colors['bg'], BG)
         self.assertEqual(colors['fg'], FG)
@@ -605,10 +668,11 @@ class TestInitConfig(unittest.TestCase):
         """Translation values come from the T dict."""
         from usage_monitor_for_claude.i18n import T
 
-        config = _init_config(_snap())
+        config = _init_config(_monitors(_snap()))
         t = config['t']
         self.assertEqual(t['title'], T['popup_title'])
         self.assertEqual(t['account'], T['account'])
+        self.assertEqual(t['accounts'], T['accounts'])
         self.assertEqual(t['email'], T['email'])
         self.assertEqual(t['plan'], T['plan'])
         self.assertEqual(t['usage'], T['usage'])
@@ -629,15 +693,15 @@ class TestInitConfig(unittest.TestCase):
         """app_version matches the package version."""
         from usage_monitor_for_claude import __version__
 
-        config = _init_config(_snap())
+        config = _init_config(_monitors(_snap()))
         self.assertEqual(config['app_version'], __version__)
 
-    def test_data_is_snapshot_to_dict_output(self):
-        """The data key contains the output of _snapshot_to_dict."""
-        snap = _snap(profile={'account': {'email': 'a@b.com'}, 'organization': {}})
-        config = _init_config(snap)
-        self.assertEqual(config['data']['profile']['email'], 'a@b.com')
-        self.assertEqual(set(config['data'].keys()), {'profile', 'usage', 'extra', 'installations', 'status'})
+    def test_data_is_popup_data_output(self):
+        """The data key contains the output of _popup_data."""
+        monitors = _monitors(_snap(profile={'account': {'email': 'a@b.com'}, 'organization': {}}))
+        config = _init_config(monitors)
+        self.assertEqual(config['data']['accounts'][0]['email'], 'a@b.com')
+        self.assertEqual(set(config['data'].keys()), {'accounts', 'installations', 'status'})
 
 
 # ---------------------------------------------------------------------------
@@ -915,7 +979,7 @@ class TestUpdateLoopResilience(unittest.TestCase):
         a pinned popup can live for days and would show stale bars forever."""
         popup = object.__new__(UsagePopup)
         popup._running = True
-        popup._last_version = 0
+        popup._last_versions = ()
         popup._window = MagicMock()
 
         class FakeCache:
@@ -929,9 +993,13 @@ class TestUpdateLoopResilience(unittest.TestCase):
                 snap.version = self.version_counter
                 return snap
 
+        class FakeMonitor:
+            def __init__(self):
+                self.cache = FakeCache()
+                self._next_poll_time = 100.0
+
         popup.app = MagicMock()
-        popup.app.cache = FakeCache()
-        popup.app._next_poll_time = 100.0
+        popup.app.monitors = [FakeMonitor()]
 
         def eval_js(_script):
             if popup._window.evaluate_js.call_count == 1:
@@ -949,7 +1017,7 @@ class TestUpdateLoopResilience(unittest.TestCase):
 
         with patch('usage_monitor_for_claude.popup.time.sleep', side_effect=guarded_sleep), \
              patch('usage_monitor_for_claude.popup.find_installations', return_value=[]), \
-             patch('usage_monitor_for_claude.popup._snapshot_to_dict', return_value={}):
+             patch('usage_monitor_for_claude.popup._popup_data', return_value={}):
             popup._update_loop()
 
         self.assertEqual(popup._window.evaluate_js.call_count, 2)
@@ -959,14 +1027,19 @@ class TestUpdateLoopResilience(unittest.TestCase):
         change again - the version marker advances only on success."""
         popup = object.__new__(UsagePopup)
         popup._running = True
-        popup._last_version = 0
+        popup._last_versions = ()
         popup._window = MagicMock()
 
         snap = MagicMock()
         snap.version = 1
+
+        class FakeMonitor:
+            def __init__(self):
+                self.cache = MagicMock(snapshot=snap)
+                self._next_poll_time = 100.0
+
         popup.app = MagicMock()
-        popup.app.cache.snapshot = snap
-        popup.app._next_poll_time = 100.0
+        popup.app.monitors = [FakeMonitor()]
 
         def eval_js(_script):
             if popup._window.evaluate_js.call_count == 1:
@@ -984,11 +1057,11 @@ class TestUpdateLoopResilience(unittest.TestCase):
 
         with patch('usage_monitor_for_claude.popup.time.sleep', side_effect=guarded_sleep), \
              patch('usage_monitor_for_claude.popup.find_installations', return_value=[]), \
-             patch('usage_monitor_for_claude.popup._snapshot_to_dict', return_value={}):
+             patch('usage_monitor_for_claude.popup._popup_data', return_value={}):
             popup._update_loop()
 
         self.assertEqual(popup._window.evaluate_js.call_count, 2)
-        self.assertEqual(popup._last_version, 1)
+        self.assertEqual(popup._last_versions, ((1, 100.0),))
 
 
 # ---------------------------------------------------------------------------

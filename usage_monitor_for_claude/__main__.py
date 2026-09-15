@@ -2,12 +2,12 @@
 from __future__ import annotations
 
 import logging
-import os
 import sys
 import traceback
 from pathlib import Path
 
-from usage_monitor_for_claude.instance_id import parse_config_dirs, split_config_dir_list
+from usage_monitor_for_claude.account import accounts_from_config_dirs
+from usage_monitor_for_claude.instance_id import autostart_config_dir_argument, resolve_config_dirs
 from usage_monitor_for_claude.platforms import prepare_gui_environment, set_dpi_awareness, show_error_box
 
 _verbose = '--verbose' in sys.argv
@@ -18,18 +18,15 @@ if _verbose and getattr(sys, 'frozen', False):
     from usage_monitor_for_claude.verbose import setup_console
     setup_console()
 
-# --config-dir selects which Claude account(s) to monitor; without it the
-# CLAUDE_CONFIG_DIR variable does. Several directories start one instance
-# each, and this process ends. A single directory must be resolved into
-# CLAUDE_CONFIG_DIR before any package import that reads the variable: api,
-# settings, verbose and i18n all read it at import or first-use time. Keep
-# every other package import below this block.
+# --config-dir names the Claude account(s) to monitor; without it the
+# CLAUDE_CONFIG_DIR variable does, and without either the default ~/.claude.
+# One process monitors every directory: one tray icon per account, one popup.
 #
-# instance_id, launch and platforms are the only exceptions, imported here
-# because this block needs them. None of them reads CLAUDE_CONFIG_DIR at
-# import time, and platforms cannot start doing so - settings imports
-# platforms, so the reverse would be a cycle.
-_config_dirs = parse_config_dirs(sys.argv) or split_config_dir_list(os.environ.get('CLAUDE_CONFIG_DIR', ''))
+# platforms, instance_id and account are imported early because this block
+# needs them; none reads CLAUDE_CONFIG_DIR at import time (settings imports
+# platforms, so a platforms->env dependency would be a cycle). Keep every
+# other package import below this block.
+_config_dirs = resolve_config_dirs()
 _missing_config_dirs = [config_dir for config_dir in _config_dirs if not Path(config_dir).is_dir()]
 if _missing_config_dirs:
     show_error_box(
@@ -38,15 +35,7 @@ if _missing_config_dirs:
     )
     sys.exit(1)
 
-if len(_config_dirs) > 1:
-    from usage_monitor_for_claude.launch import launch_account_instances
-    for _started_config_dir in launch_account_instances(_config_dirs, verbose=_verbose):
-        if _verbose:
-            print(f'  [startup] started instance for {_started_config_dir}', flush=True)
-    sys.exit(0)
-
-if _config_dirs:
-    os.environ['CLAUDE_CONFIG_DIR'] = str(Path(_config_dirs[0]).resolve())
+_accounts = accounts_from_config_dirs(_config_dirs)
 
 # Both must be settled before pywebview creates any window: DPI awareness
 # cannot be changed once a window exists, and the GUI toolkit reads its
@@ -89,7 +78,7 @@ def _run_app() -> None:
             print_runtime_diagnostics()
 
         _verbose_step('UsageMonitorForClaude()...')
-        app = UsageMonitorForClaude()
+        app = UsageMonitorForClaude(_accounts)
         _verbose_step('UsageMonitorForClaude()... OK')
 
         _verbose_step('app.run...')
@@ -136,8 +125,9 @@ try:
         release_instance_lock()
 
         passthrough_args = []
-        if _config_dirs:
-            passthrough_args.append(f'--config-dir={os.environ["CLAUDE_CONFIG_DIR"]}')
+        config_dir_argument = autostart_config_dir_argument()
+        if config_dir_argument is not None:
+            passthrough_args.append(f'--config-dir={config_dir_argument}')
         if _verbose:
             passthrough_args.append('--verbose')
 

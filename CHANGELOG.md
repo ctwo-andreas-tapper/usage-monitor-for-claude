@@ -9,11 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Several Claude accounts can now be monitored from a single command: pass all of their config directories to `--config-dir` (separated by `;` on Windows, `:` on Linux, or by repeating the flag) or set `CLAUDE_CONFIG_DIR` to that list, and one tray icon starts per account. **Start at login** on any of those icons brings the whole set back, so you no longer need one shortcut and one autostart entry per account
+- Several Claude accounts can now be monitored by one app: pass all of their config directories to `--config-dir` (separated by `;` on Windows, `:` on Linux, or by repeating the flag) or set `CLAUDE_CONFIG_DIR` to that list. Each account gets its own tray icon, and the popup shows one section per account, each with that account's quota bars. **Start at login** stores the whole list. The accounts stagger their first poll so they do not all call the API at once, and each backs off on its own rate limit (HTTP 429) without holding back the others
 - The Extra Usage section in the detail popup now also shows the prepaid usage credits you have left to pay for it, so you can tell whether work can continue instead of only seeing what has been spent (thanks to [@TheConfax](https://github.com/TheConfax) for the contribution)
 
 ### Changed
 
+- A `usage-monitor-settings.json` inside a Claude config directory is no longer read; the app uses one settings file (next to the EXE or in `~/.claude`) for every account
 - Polling no longer stops while the computer is idle or locked - it continues on a 15-minute cadence, configurable via the new [`idle_interval`](docs/configuration.md#polling-intervals) setting. Quota resets, threshold alerts and event commands now fire on time on an unattended computer, and switching your Claude account is picked up right away instead of at your next keystroke
 - The expired-session and missing-token messages now name the Claude Code CLI and the command that fixes it (`claude auth login`) - previously they asked you to open Claude Code, which helps nobody whose Claude Code is already open and whose CLI login is the part that expired (thanks to [@mjtlsnelling-art](https://github.com/mjtlsnelling-art) for reporting [#89](https://github.com/jens-duttke/usage-monitor-for-claude/issues/89))
 

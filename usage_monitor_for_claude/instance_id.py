@@ -2,41 +2,37 @@
 Instance Identity
 ==================
 
-Derives a per-instance identifier from the effective Claude config
-directory so multiple monitor instances (one per Claude account) can
-coexist, each guarding its own single-instance mutex and autostart
-registry entry.
+Derives the identity of one monitor process from the Claude config
+directories it was launched to watch, so a launch guards its own
+single-instance mutex and writes its own autostart entry.
 
-Several accounts can be named in one launch: ``--config-dir`` may be
-repeated or hold an ``os.pathsep``-separated list, and so may
-``CLAUDE_CONFIG_DIR``.  The launching process starts one instance per
-directory and hands every instance the whole set via
-``LAUNCH_CONFIG_DIRS_ENV``, so the autostart entry any of them writes
-starts the whole set again.
+One process now monitors the whole set: ``--config-dir`` may be repeated
+or hold an ``os.pathsep``-separated list, and so may ``CLAUDE_CONFIG_DIR``.
+No child processes are started; ``launch_suffix()`` names the mutex and the
+autostart entry for the resolved set as a whole, order-independent, so the
+same set always maps to one singleton and one **Start at login** entry.
 
 This module must stay free of imports from ``api`` or ``settings`` -
-it is used before ``CLAUDE_CONFIG_DIR`` is finalized in ``__main__``.
+it is used before the config directories are finalized in ``__main__``.
 """
 from __future__ import annotations
 
 import hashlib
 import os
 import re
+import sys
+from collections.abc import Mapping
 from pathlib import Path
 
+from .account import default_config_dir, is_default_config_dir
+
 __all__ = [
-    'CONFIG_DIR_SEPARATOR', 'LAUNCH_CONFIG_DIRS_ENV', 'autostart_config_dir_argument', 'autostart_suffix',
-    'config_dir_suffix', 'effective_config_dir', 'is_default_config_dir', 'launch_config_dirs', 'parse_config_dirs',
-    'split_config_dir_list',
+    'CONFIG_DIR_SEPARATOR', 'autostart_config_dir_argument', 'launch_config_dirs', 'launch_suffix',
+    'parse_config_dirs', 'resolve_config_dirs', 'split_config_dir_list',
 ]
 
 # Same separator as PATH: ';' on Windows, ':' elsewhere.
 CONFIG_DIR_SEPARATOR = os.pathsep
-
-# Set by the launching process on every per-account instance it starts:
-# the resolved config directories of the whole launch, joined with
-# CONFIG_DIR_SEPARATOR.  Unset when a single directory was launched directly.
-LAUNCH_CONFIG_DIRS_ENV = 'USAGE_MONITOR_CONFIG_DIRS'
 
 
 def parse_config_dirs(argv: list[str]) -> list[str]:
@@ -120,78 +116,61 @@ def _clean_config_dir(value: str) -> str | None:
     return str(Path(os.path.expandvars(value)).expanduser())
 
 
-def effective_config_dir() -> Path:
-    """Return the resolved Claude config directory currently in effect."""
-    custom = os.environ.get('CLAUDE_CONFIG_DIR')
-    base = Path(custom) if custom else Path.home() / '.claude'
-    return base.resolve()
+def resolve_config_dirs(argv: list[str] | None = None, environ: Mapping[str, str] | None = None) -> list[str]:
+    """Return the config directories this launch names, cleaned, in order.
 
+    ``--config-dir`` values win; without any, ``CLAUDE_CONFIG_DIR`` is split
+    the same way.  Empty means only the default ``~/.claude``.
 
-def is_default_config_dir() -> bool:
-    """Return True when the effective config dir is the default ``~/.claude``."""
-    return _is_default(effective_config_dir())
+    Parameters
+    ----------
+    argv : list[str] | None
+        Argument list, defaulting to ``sys.argv``.
+    environ : Mapping[str, str] | None
+        Environment mapping, defaulting to ``os.environ``.
 
-
-def config_dir_suffix() -> str:
-    """Return a per-instance suffix for kernel object names.
-
-    Empty for the default ``~/.claude`` directory (preserving the legacy
-    names so older versions are still detected), otherwise an underscore
-    plus a short hash of the resolved, case-normalized directory path.
-    Hashing keeps the names free of characters that are invalid in Win32
-    kernel object names (e.g. backslashes).
+    Returns
+    -------
+    list[str]
+        The cleaned config directories, empty when none were named.
     """
-    if is_default_config_dir():
-        return ''
+    argv = sys.argv if argv is None else argv
+    environ = os.environ if environ is None else environ
 
-    return _hash_suffix([effective_config_dir()])
+    return parse_config_dirs(argv) or split_config_dir_list(environ.get('CLAUDE_CONFIG_DIR', ''))
 
 
 def launch_config_dirs() -> list[Path]:
-    """Return the resolved config directories this launch monitors.
+    """Return the resolved config directories monitored by this process."""
+    config_dirs = resolve_config_dirs()
+    if not config_dirs:
+        return [default_config_dir()]
 
-    The whole set when this instance was started as one of several
-    (``LAUNCH_CONFIG_DIRS_ENV``), otherwise just the effective directory.
-    """
-    launch_set = os.environ.get(LAUNCH_CONFIG_DIRS_ENV, '')
-    if not launch_set:
-        return [effective_config_dir()]
-
-    return [Path(entry).resolve() for entry in split_config_dir_list(launch_set)]
+    return [Path(config_dir).resolve() for config_dir in config_dirs]
 
 
-def autostart_suffix() -> str:
-    """Return the suffix for the autostart entry name.
+def launch_suffix() -> str:
+    """Return the suffix naming this launch's kernel objects and autostart entry.
 
-    Identical to ``config_dir_suffix()`` for a single directory, so entries
-    written by earlier versions keep working.  A launch set hashes all of
-    its directories together, order-independent, so every instance of the
-    set toggles the same entry.
+    Empty for the single default ``~/.claude`` directory (legacy names stay
+    valid), otherwise an underscore plus a short hash of the resolved,
+    case-normalized directories, order-independent so the same set always
+    maps to one mutex and one autostart entry.
     """
     config_dirs = launch_config_dirs()
-    if len(config_dirs) == 1 and _is_default(config_dirs[0]):
+    if len(config_dirs) == 1 and is_default_config_dir(config_dirs[0]):
         return ''
 
     return _hash_suffix(config_dirs)
 
 
 def autostart_config_dir_argument() -> str | None:
-    """Return the ``--config-dir`` value the autostart entry must carry.
-
-    None when only the default ``~/.claude`` is monitored, otherwise the
-    resolved directories of the launch joined with ``CONFIG_DIR_SEPARATOR``.
-    """
+    """Return the ``--config-dir`` value the autostart entry must carry, or None for the plain default."""
     config_dirs = launch_config_dirs()
-    if len(config_dirs) == 1 and _is_default(config_dirs[0]):
+    if len(config_dirs) == 1 and is_default_config_dir(config_dirs[0]):
         return None
 
     return CONFIG_DIR_SEPARATOR.join(str(config_dir) for config_dir in config_dirs)
-
-
-def _is_default(config_dir: Path) -> bool:
-    """Return True when the resolved path is the default ``~/.claude``."""
-    default = (Path.home() / '.claude').resolve()
-    return os.path.normcase(str(config_dir)) == os.path.normcase(str(default))
 
 
 def _hash_suffix(config_dirs: list[Path]) -> str:

@@ -2,7 +2,7 @@
 Application
 =============
 
-System tray application class with adaptive polling and event handling.
+System tray application: one AccountMonitor per Claude account, one shared shell.
 """
 from __future__ import annotations
 
@@ -16,11 +16,11 @@ from typing import Any
 
 import pystray  # type: ignore[import-untyped]  # no type stubs available
 
+from .account import Account
 from .api import api_headers, read_access_token
 from .cache import UsageCache
 from .claude_cli import PROJECT_URL
 from .command import run_event_command
-from .instance_id import effective_config_dir, is_default_config_dir
 from .platforms import (
     autostart_supported, get_idle_seconds, install_tray_click_handler, is_autostart_enabled,
     is_screensaver_running, is_workstation_locked, set_autostart, show_error_box, sync_autostart_path,
@@ -29,14 +29,14 @@ from .platforms import (
 from .settings import (
     ALERT_EXTRA_USAGE_SPENT, ALERT_TIME_AWARE, ALERT_TIME_AWARE_BELOW, ICON_FIELDS, IDLE_INTERVAL, IDLE_PAUSE,
     NOTIFY_CLAUDE_UPDATE, ON_RESET_COMMAND, ON_STARTUP_COMMAND, ON_THRESHOLD_COMMAND, POLL_ERROR, POLL_FAST,
-    POLL_FAST_EXTRA, POLL_INTERVAL, QUICK_ACTION_COMMAND, get_alert_thresholds,
+    POLL_FAST_EXTRA, POLL_INTERVAL, POLL_STAGGER, QUICK_ACTION_COMMAND, get_alert_thresholds,
 )
 from .formatting import elapsed_pct, field_period, format_credits, format_tooltip, parse_field_name, popup_label
 from .i18n import T
 from .popup import UsagePopup
 from .tray_icon import create_icon_image, create_status_image
 
-__all__ = ['UsageMonitorForClaude', 'crash_log']
+__all__ = ['AccountMonitor', 'UsageMonitorForClaude', 'crash_log']
 
 # Seconds after a reset at which to place the confirming poll.  A small buffer
 # absorbs minor timing differences (clocks, caches, server-side propagation).
@@ -98,13 +98,32 @@ def _align_to_reset(interval: int, next_reset: float | None) -> tuple[int, bool]
     return interval, False                     # reset still far - keep the normal cadence
 
 
-class UsageMonitorForClaude:
-    """System tray application displaying Claude usage."""
+class AccountMonitor:
+    """Tray icon, cache and poll loop for one Claude account."""
 
-    def __init__(self) -> None:
-        """Set up the tray icon with context menu and polling state."""
+    def __init__(self, account: Account, shell: UsageMonitorForClaude, *, show_label: bool,
+                 poll_offset: float = 0.0) -> None:
+        """Set up the account's tray icon, cache and polling state.
+
+        Parameters
+        ----------
+        account : Account
+            The Claude account this monitor tracks.
+        shell : UsageMonitorForClaude
+            The owning shell, holding the shared popup and theme state.
+        show_label : bool
+            When True, the tray title and notifications carry a ``[label] ``
+            prefix so several accounts can be told apart.
+        poll_offset : float
+            Seconds to delay this account's first poll, spreading the
+            cold-start burst so the accounts do not all fetch at once.
+        """
+        self.account = account
+        self.shell = shell
         self.running = True
-        self.cache = UsageCache()
+        self.cache = UsageCache(account)
+        self._poll_offset = poll_offset
+        self.label_prefix = f'[{account.label}] ' if show_label else ''
 
         # Last raw API response (may contain 'error') - for icon and polling decisions
         self._last_response: dict[str, Any] = {}
@@ -122,51 +141,13 @@ class UsageMonitorForClaude:
         self._notify_lock = threading.Lock()
         self._deferred_notifications: dict[str, tuple[str, str]] = {}
 
-        # Popup state
-        self._popup_lock = threading.Lock()
-        self._popup_open = False
-        self._popup_closed_at = 0.0
         self._next_poll_time: float | None = None
 
-        # Theme state
-        self._light_taskbar = taskbar_uses_light_theme()
-
-        self.restart_requested = False
-
-        # Non-default config dirs get a tooltip prefix so multiple
-        # instances (one per Claude account) can be told apart.
-        self._tooltip_prefix = '' if is_default_config_dir() else f'[{effective_config_dir().name}] '
-
         self.icon = pystray.Icon(
-            'usage_monitor',
-            icon=create_icon_image(0, 0, self._light_taskbar),
-            title=self._tooltip_prefix + T['loading'],
-            menu=pystray.Menu(
-                pystray.MenuItem(T['menu_show'], self.on_show_popup, default=True),
-                pystray.MenuItem(
-                    T['menu_quick_action'], self.on_run_quick_action,
-                    visible=self._quick_action_menu_visible,
-                ),
-                pystray.Menu.SEPARATOR,
-                pystray.MenuItem(
-                    T['autostart'], self.on_toggle_autostart,
-                    checked=lambda item: is_autostart_enabled(),
-                    visible=autostart_supported(),
-                ),
-                pystray.MenuItem(T['test_commands'], pystray.Menu(
-                    pystray.MenuItem(T['test_reset_5h'], self.on_test_reset_5h, enabled=bool(ON_RESET_COMMAND)),
-                    pystray.MenuItem(T['test_reset_7d'], self.on_test_reset_7d, enabled=bool(ON_RESET_COMMAND)),
-                    pystray.MenuItem(T['test_threshold_5h'], self.on_test_threshold_5h, enabled=bool(ON_THRESHOLD_COMMAND)),
-                    pystray.MenuItem(T['test_threshold_7d'], self.on_test_threshold_7d, enabled=bool(ON_THRESHOLD_COMMAND)),
-                    pystray.MenuItem(T['test_startup'], self.on_test_startup, enabled=bool(ON_STARTUP_COMMAND)),
-                    pystray.MenuItem(T['test_quick_action'], self.on_test_quick_action, enabled=bool(QUICK_ACTION_COMMAND)),
-                ), enabled=bool(ON_RESET_COMMAND or ON_STARTUP_COMMAND or ON_THRESHOLD_COMMAND or QUICK_ACTION_COMMAND)),
-                pystray.MenuItem(T['restart'], self.on_restart),
-                pystray.Menu.SEPARATOR,
-                pystray.MenuItem(T['menu_project'], self.on_open_project),
-                pystray.Menu.SEPARATOR,
-                pystray.MenuItem(T['quit'], self.on_quit),
-            ),
+            f'usage_monitor_{account.label}',
+            icon=create_icon_image(0, 0, shell._light_taskbar),
+            title=self.label_prefix + T['loading'],
+            menu=shell.build_menu(),
         )
 
         # Only wired up when a command is configured, so the platform's own
@@ -175,129 +156,22 @@ class UsageMonitorForClaude:
         # this process - so the result is reported rather than assumed.
         self.double_click_installed = False
         if QUICK_ACTION_COMMAND:
-            self.double_click_installed = install_tray_click_handler(
-                self.icon, self.on_show_popup, self._run_quick_action,
-            )
-            if not self.double_click_installed:
-                # Printed rather than shown: not worth a dialog on every start,
-                # and the command is still reachable from the menu entry that
-                # appears in exactly this case.  Visible with --verbose, which
-                # is where someone looks when the double-click stopped working.
-                print('A quick action is configured, but this system does not report tray double-clicks. '
-                      'Use the tray menu entry instead.')
+            self.double_click_installed = install_tray_click_handler(self.icon, shell.on_show_popup, shell._run_quick_action)
 
-    # Menu actions
+    # Account identity
 
-    def on_show_popup(self, icon: Any = None, item: Any = None) -> None:
-        with self._popup_lock:
-            if self._popup_open:
-                return
-            if time.time() - self._popup_closed_at < 0.15:
-                return
-            self._popup_open = True
-        threading.Thread(target=self._open_popup, daemon=True).start()
+    def profile_email(self) -> str:
+        """Return the account's profile email, or '' when unknown."""
+        profile = self.cache.profile
+        return ((profile.get('account') or {}).get('email') or '') if isinstance(profile, dict) else ''
 
-    def on_toggle_autostart(self, icon: Any = None, item: Any = None) -> None:
-        set_autostart(not is_autostart_enabled())
-
-    def on_restart(self, icon: Any = None, item: Any = None) -> None:
-        self.restart_requested = True
-        self.on_quit(icon, item)
-
-    def on_open_project(self, icon: Any = None, item: Any = None) -> None:
-        webbrowser.open(PROJECT_URL)
-
-    def on_test_reset_5h(self, icon: Any = None, item: Any = None) -> None:
-        run_event_command(ON_RESET_COMMAND, {
-            'USAGE_MONITOR_EVENT': 'reset',
-            'USAGE_MONITOR_VARIANT': 'five_hour',
-            'USAGE_MONITOR_UTILIZATION': '0',
-            'USAGE_MONITOR_PREV_UTILIZATION': '95',
-            'USAGE_MONITOR_UTILIZATION_FIVE_HOUR': '0',
-            'USAGE_MONITOR_UTILIZATION_SEVEN_DAY': '45',
-            'USAGE_MONITOR_RESETS_AT': _future_iso(hours=5),
-            'USAGE_MONITOR_TITLE': T['notify_reset_title'],
-            'USAGE_MONITOR_MESSAGE': T['notify_reset'],
-        }, capture_output=True)
-
-    def on_test_reset_7d(self, icon: Any = None, item: Any = None) -> None:
-        run_event_command(ON_RESET_COMMAND, {
-            'USAGE_MONITOR_EVENT': 'reset',
-            'USAGE_MONITOR_VARIANT': 'seven_day',
-            'USAGE_MONITOR_UTILIZATION': '0',
-            'USAGE_MONITOR_PREV_UTILIZATION': '99',
-            'USAGE_MONITOR_UTILIZATION_FIVE_HOUR': '12',
-            'USAGE_MONITOR_UTILIZATION_SEVEN_DAY': '0',
-            'USAGE_MONITOR_RESETS_AT': _future_iso(days=7),
-            'USAGE_MONITOR_TITLE': T['notify_reset_title'],
-            'USAGE_MONITOR_MESSAGE': T['notify_reset'],
-        }, capture_output=True)
-
-    def on_test_threshold_5h(self, icon: Any = None, item: Any = None) -> None:
-        run_event_command(ON_THRESHOLD_COMMAND, {
-            'USAGE_MONITOR_EVENT': 'threshold',
-            'USAGE_MONITOR_VARIANT': 'five_hour',
-            'USAGE_MONITOR_UTILIZATION': '82',
-            'USAGE_MONITOR_THRESHOLD': '80',
-            'USAGE_MONITOR_RESETS_AT': _future_iso(hours=3),
-            'USAGE_MONITOR_TITLE': T['notify_threshold_title'],
-            'USAGE_MONITOR_MESSAGE': T['notify_threshold_generic'].format(label=popup_label('five_hour'), pct='82'),
-        }, capture_output=True)
-
-    def on_test_threshold_7d(self, icon: Any = None, item: Any = None) -> None:
-        run_event_command(ON_THRESHOLD_COMMAND, {
-            'USAGE_MONITOR_EVENT': 'threshold',
-            'USAGE_MONITOR_VARIANT': 'seven_day',
-            'USAGE_MONITOR_UTILIZATION': '81',
-            'USAGE_MONITOR_THRESHOLD': '80',
-            'USAGE_MONITOR_RESETS_AT': _future_iso(days=4),
-            'USAGE_MONITOR_TITLE': T['notify_threshold_title'],
-            'USAGE_MONITOR_MESSAGE': T['notify_threshold_generic'].format(label=popup_label('seven_day'), pct='81'),
-        }, capture_output=True)
-
-    def on_test_startup(self, icon: Any = None, item: Any = None) -> None:
-        run_event_command(ON_STARTUP_COMMAND, {
-            'USAGE_MONITOR_EVENT': 'startup',
-            'USAGE_MONITOR_UTILIZATION_FIVE_HOUR': '0',
-            'USAGE_MONITOR_RESETS_AT_FIVE_HOUR': '',
-            'USAGE_MONITOR_UTILIZATION_SEVEN_DAY': '45',
-            'USAGE_MONITOR_RESETS_AT_SEVEN_DAY': _future_iso(days=3),
-        }, capture_output=True)
-
-    def _quick_action_menu_visible(self, item: Any = None) -> bool:
-        """Whether the menu needs to offer the quick action.
-
-        Only where the tray cannot report a double-click itself, so a
-        configured quick action stays reachable instead of being dead.
-        pystray resolves this when the menu opens, which is after the click
-        handler had its chance to install.
-        """
-        return bool(QUICK_ACTION_COMMAND) and not self.double_click_installed
-
-    def on_run_quick_action(self, icon: Any = None, item: Any = None) -> None:
-        """Run the configured quick action from the menu.
-
-        The menu is the only route to it on a desktop whose panel handles the
-        tray click itself and never passes it to the application.
-        """
-        self._run_quick_action()
-
-    def on_test_quick_action(self, icon: Any = None, item: Any = None) -> None:
-        run_event_command(QUICK_ACTION_COMMAND, {
-            'USAGE_MONITOR_EVENT': 'quick_action',
-            'USAGE_MONITOR_UTILIZATION_FIVE_HOUR': '30',
-            'USAGE_MONITOR_RESETS_AT_FIVE_HOUR': _future_iso(hours=3),
-            'USAGE_MONITOR_UTILIZATION_SEVEN_DAY': '55',
-            'USAGE_MONITOR_RESETS_AT_SEVEN_DAY': _future_iso(days=4),
-        }, capture_output=True)
-
-    def on_quit(self, icon: Any = None, item: Any = None) -> None:
-        self.running = False
-        self.icon.stop()
+    def account_env(self) -> dict[str, str]:
+        """Environment variables naming this account for event commands."""
+        return {'USAGE_MONITOR_ACCOUNT': self.account.label, 'USAGE_MONITOR_ACCOUNT_EMAIL': self.profile_email()}
 
     # Popup
 
-    def _should_refresh_usage(self) -> bool:
+    def should_refresh_usage(self) -> bool:
         """Return whether opening the popup should trigger a background usage fetch.
 
         Refreshes stale data, with one exception: when a quota reset is closer
@@ -316,38 +190,13 @@ class UsageMonitorForClaude:
         next_reset = self._seconds_until_next_reset()
         return not (next_reset is not None and next_reset < POLL_FAST)
 
-    def _open_popup(self) -> None:
-        # _popup_open is set True under _popup_lock (in on_show_popup) and
-        # reset here without the lock.  This is safe because False is the
-        # permissive default - a momentary stale True only delays the next open.
-        try:
-            needs_profile = not self.cache.profile
-            needs_refresh = self._should_refresh_usage()
-            if needs_profile or needs_refresh:
-                # Single thread: ensure_profile() and update() both acquire
-                # cache._lock, so they must run sequentially.  Two threads
-                # would cause update()'s non-blocking acquire to fail while
-                # ensure_profile() holds the lock.
-                def _bg_refresh() -> None:
-                    if needs_profile:
-                        self.cache.ensure_profile()
-                    if needs_refresh:
-                        self.update()
-                threading.Thread(target=_bg_refresh, daemon=True).start()
-            UsagePopup(self)
-        finally:
-            self._popup_closed_at = time.time()
-            self._popup_open = False
-
-    # Double-click handling
-
     # Tray rendering
 
-    def _render_tray(self) -> None:
+    def render_tray(self) -> None:
         """Re-render tray icon and tooltip from current state."""
         data = self._last_response
         if 'error' in data:
-            self.icon.icon = create_status_image('C!' if data.get('auth_error') else '!', self._light_taskbar)
+            self.icon.icon = create_status_image('C!' if data.get('auth_error') else '!', self.shell._light_taskbar)
         else:
             top_field, top_mode = ICON_FIELDS[0].split(':', 1) if ':' in ICON_FIELDS[0] else (ICON_FIELDS[0], 'utilization')
             bottom_field, bottom_mode = ICON_FIELDS[1].split(':', 1) if ':' in ICON_FIELDS[1] else (ICON_FIELDS[1], 'utilization')
@@ -372,22 +221,12 @@ class UsageMonitorForClaude:
             # usage, which cannot be exhausted.
             extra_usage_available = bool(extra.get('is_enabled')) and (extra_limit <= 0 or extra_used < extra_limit)
             self.icon.icon = create_icon_image(
-                pct_top, pct_bottom, self._light_taskbar,
+                pct_top, pct_bottom, self.shell._light_taskbar,
                 mode_top=top_mode, mode_bottom=bottom_mode,
                 time_pct_top=time_pct_top, time_pct_bottom=time_pct_bottom,
                 extra_usage_available=extra_usage_available,
             )
-        self.icon.title = self._tooltip_prefix + format_tooltip(data)
-
-    def _on_theme_changed(self) -> None:
-        """Re-render the tray icon when the Windows theme changes."""
-        light = taskbar_uses_light_theme()
-        if light == self._light_taskbar:
-            return
-
-        self._light_taskbar = light
-        if self._last_response:
-            self._render_tray()
+        self.icon.title = self.label_prefix + format_tooltip(data)
 
     # Update orchestration
 
@@ -407,7 +246,7 @@ class UsageMonitorForClaude:
             return
 
         self._last_response = result.data
-        self._render_tray()
+        self.render_tray()
 
         # Handle CLI update notification from token refresh
         if NOTIFY_CLAUDE_UPDATE and result.token_refresh and result.token_refresh.updated:
@@ -426,7 +265,7 @@ class UsageMonitorForClaude:
         # in place until the next regular poll.  Keep every baseline untouched instead - for a
         # real switch the poll loop's token watcher forces an immediate refetch that reports it
         # with the new data; a same-account token rotation just resumes on the next poll.
-        if result.token is not None and result.token != read_access_token():
+        if result.token is not None and result.token != read_access_token(self.account):
             return
 
         # Detect account switch: re-fetch profile if the access token changed, then compare UUIDs.
@@ -530,7 +369,7 @@ class UsageMonitorForClaude:
             with self._notify_lock:
                 self._deferred_notifications[category] = (message, title)
         else:
-            self.icon.notify(message, title)
+            self.icon.notify(message, self.label_prefix + title)
 
     def _flush_deferred_notifications(self) -> None:
         """Show all deferred notifications and clear the queue.
@@ -542,7 +381,7 @@ class UsageMonitorForClaude:
         with self._notify_lock:
             pending, self._deferred_notifications = self._deferred_notifications, {}
         for message, title in pending.values():
-            self.icon.notify(message, title)
+            self.icon.notify(message, self.label_prefix + title)
 
     def _check_threshold_alerts(self, data: dict[str, Any]) -> None:
         """Show a notification when usage crosses a configured threshold.
@@ -701,28 +540,8 @@ class UsageMonitorForClaude:
         if not ON_STARTUP_COMMAND:
             return
 
-        env_vars = {'USAGE_MONITOR_EVENT': 'startup', **self._quota_snapshot_env(data)}
+        env_vars = {'USAGE_MONITOR_EVENT': 'startup', **self._quota_snapshot_env(data), **self.account_env()}
         run_event_command(ON_STARTUP_COMMAND, env_vars)
-
-    def _run_quick_action(self) -> None:
-        """Run the user-configured quick action if set.
-
-        Receives the latest quota state (from the most recent successful
-        update) so the command can act on current usage, mirroring the
-        startup command's environment.  The quick action is user-driven, so
-        a command that exits with a non-zero code surfaces its
-        stderr in an error dialog (``capture_output``) instead of failing
-        silently - unlike the automatic reset/threshold/startup commands.
-        The dialog is limited to failures right after the launch
-        (``report_late_failures=False``): this command usually starts an app
-        the user keeps open, and its exit code once that app closes says
-        nothing about the command being configured correctly.
-        """
-        if not QUICK_ACTION_COMMAND:
-            return
-
-        env_vars = {'USAGE_MONITOR_EVENT': 'quick_action', **self._quota_snapshot_env(self._last_response)}
-        run_event_command(QUICK_ACTION_COMMAND, env_vars, capture_output=True, report_late_failures=False)
 
     def _run_reset_command(
         self, variant: str, pct: float, prev_pct: float, *, data: dict[str, Any], entry: dict[str, Any],
@@ -743,6 +562,7 @@ class UsageMonitorForClaude:
             'USAGE_MONITOR_RESETS_AT': entry.get('resets_at') or '',
             'USAGE_MONITOR_TITLE': T['notify_reset_title'],
             'USAGE_MONITOR_MESSAGE': T['notify_reset'],
+            **self.account_env(),
         })
 
     def _run_threshold_command(
@@ -780,6 +600,7 @@ class UsageMonitorForClaude:
             env_vars['USAGE_MONITOR_EXTRA_USED'] = extra_used
         if extra_limit:
             env_vars['USAGE_MONITOR_EXTRA_LIMIT'] = extra_limit
+        env_vars.update(self.account_env())
 
         run_event_command(ON_THRESHOLD_COMMAND, env_vars)
 
@@ -938,13 +759,29 @@ class UsageMonitorForClaude:
 
         An open popup holds the normal cadence: its numbers are on screen and
         would go stale in front of the user, however long ago the last mouse
-        move was.  A covered screen overrides that - nobody reads a popup
-        behind the lock screen or a screensaver.
+        move was.  An open popup on any account holds every account's cadence,
+        since the popup shows them all.  A covered screen overrides that -
+        nobody reads a popup behind the lock screen or a screensaver.
         """
-        if self._popup_open and not self._screen_hidden():
+        if self.shell.popup_open and not self._screen_hidden():
             return False
 
         return self._is_user_away()
+
+    def _wait_poll_offset(self) -> None:
+        """Delay the first poll by ``_poll_offset`` seconds, stop-aware.
+
+        Staggers the accounts' cold-start fetches so they do not all hit
+        the API at once; the shared rate-limit backoff then holds the rest
+        back if an earlier account is already throttled.  The wait yields
+        immediately to a quit request.
+        """
+        deadline = time.time() + self._poll_offset
+        while self.running:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                return
+            time.sleep(min(1.0, remaining))
 
     def poll_loop(self) -> None:
         """Poll the API in a loop with adaptive intervals.
@@ -954,6 +791,7 @@ class UsageMonitorForClaude:
         watcher keeps running on an unattended machine.  Coming back - or
         opening the popup - pulls the next poll back to the normal cadence.
         """
+        self._wait_poll_offset()
         self.cache.ensure_profile()
         force_next = False
         while self.running:
@@ -961,7 +799,7 @@ class UsageMonitorForClaude:
             # request is in flight would otherwise already be part of the token read
             # afterwards and never register as a change - leaving the previous account's
             # usage on screen until the next regular poll.
-            token_seen = read_access_token()
+            token_seen = read_access_token(self.account)
             self.update(force=force_next)
             force_next = False
             interval = self._calculate_poll_interval()
@@ -979,7 +817,7 @@ class UsageMonitorForClaude:
                 # change while the last fetch failed auth is retried at once so a
                 # freshly refreshed token recovers usage and profile without
                 # waiting out the error cadence or needing a restart.
-                current_token = read_access_token()
+                current_token = read_access_token(self.account)
                 if current_token and current_token != token_seen:
                     token_seen = current_token
                     if self._account_switched():
@@ -1027,23 +865,303 @@ class UsageMonitorForClaude:
                     self._next_poll_time = target
                 throttled_seen = throttled_now
 
-    # Lifecycle
-
-    def _on_icon_ready(self, icon: Any) -> None:
-        """Called by pystray in a separate thread once the tray icon is set up."""
+    def on_icon_ready(self, icon: Any) -> None:
+        """Called by pystray on its own thread once this icon is set up."""
         try:
+            # A quit from another icon's menu can land before this icon exists,
+            # where stop() is a no-op; stop it now that it is ready, or its
+            # non-daemon loop thread would keep the process alive.
+            if not self.shell.running:
+                icon.stop()
+                return
             icon.visible = True
-            if autostart_supported():
-                sync_autostart_path()
-            if not api_headers():
-                icon.notify(f"{T['warn_no_token']}\n{T['warn_login']}", T['popup_title'])
-            threading.Thread(target=watch_theme_change, args=(self._on_theme_changed,), daemon=True).start()
+            if not api_headers(self.account):
+                icon.notify(f"{T['warn_no_token']}\n{T['warn_login']}", self.label_prefix + T['popup_title'])
             self.poll_loop()
         except Exception:
             crash_log(traceback.format_exc())
 
+
+class UsageMonitorForClaude:
+    """System tray application: one icon per account, one shared popup."""
+
+    def __init__(self, accounts: list[Account]) -> None:
+        """Set up one AccountMonitor per account plus the shared popup state.
+
+        Parameters
+        ----------
+        accounts : list[Account]
+            The Claude accounts to monitor, in launch order.  At least one
+            account is required.
+        """
+        assert accounts, 'at least one account is required'
+        self.running = True
+        self.restart_requested = False
+
+        # Popup state (shared: one popup shows every account)
+        self._popup_lock = threading.Lock()
+        self._popup_open = False
+        self._popup_closed_at = 0.0
+
+        # Theme state (shared: all icons re-render together on a theme change)
+        self._light_taskbar = taskbar_uses_light_theme()
+
+        # Only True once every icon reports a working double-click, so the menu
+        # entry stays offered where any icon could not wire one up.
+        self.double_click_installed = False
+        # Each account keeps its own 429 backoff (the usage limit is per
+        # account); the stagger just spreads their first polls apart.
+        self.monitors = [
+            AccountMonitor(account, self, show_label=len(accounts) > 1, poll_offset=index * POLL_STAGGER)
+            for index, account in enumerate(accounts)
+        ]
+        self.double_click_installed = all(monitor.double_click_installed for monitor in self.monitors)
+        if QUICK_ACTION_COMMAND and not self.double_click_installed:
+            # Printed rather than shown: not worth a dialog on every start,
+            # and the command is still reachable from the menu entry that
+            # appears in exactly this case.  Visible with --verbose, which
+            # is where someone looks when the double-click stopped working.
+            print('A quick action is configured, but this system does not report tray double-clicks. '
+                  'Use the tray menu entry instead.')
+
+    @property
+    def accounts(self) -> list[Account]:
+        return [monitor.account for monitor in self.monitors]
+
+    @property
+    def popup_open(self) -> bool:
+        return self._popup_open
+
+    def build_menu(self) -> pystray.Menu:
+        """Return a fresh context menu; every icon gets its own instance."""
+        return pystray.Menu(
+            pystray.MenuItem(T['menu_show'], self.on_show_popup, default=True),
+            pystray.MenuItem(
+                T['menu_quick_action'], self.on_run_quick_action,
+                visible=self._quick_action_menu_visible,
+            ),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem(
+                T['autostart'], self.on_toggle_autostart,
+                checked=lambda item: is_autostart_enabled(),
+                visible=autostart_supported(),
+            ),
+            pystray.MenuItem(T['test_commands'], pystray.Menu(
+                pystray.MenuItem(T['test_reset_5h'], self.on_test_reset_5h, enabled=bool(ON_RESET_COMMAND)),
+                pystray.MenuItem(T['test_reset_7d'], self.on_test_reset_7d, enabled=bool(ON_RESET_COMMAND)),
+                pystray.MenuItem(T['test_threshold_5h'], self.on_test_threshold_5h, enabled=bool(ON_THRESHOLD_COMMAND)),
+                pystray.MenuItem(T['test_threshold_7d'], self.on_test_threshold_7d, enabled=bool(ON_THRESHOLD_COMMAND)),
+                pystray.MenuItem(T['test_startup'], self.on_test_startup, enabled=bool(ON_STARTUP_COMMAND)),
+                pystray.MenuItem(T['test_quick_action'], self.on_test_quick_action, enabled=bool(QUICK_ACTION_COMMAND)),
+            ), enabled=bool(ON_RESET_COMMAND or ON_STARTUP_COMMAND or ON_THRESHOLD_COMMAND or QUICK_ACTION_COMMAND)),
+            pystray.MenuItem(T['restart'], self.on_restart),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem(T['menu_project'], self.on_open_project),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem(T['quit'], self.on_quit),
+        )
+
+    # Menu actions
+
+    def on_show_popup(self, icon: Any = None, item: Any = None) -> None:
+        with self._popup_lock:
+            if self._popup_open:
+                return
+            if time.time() - self._popup_closed_at < 0.15:
+                return
+            self._popup_open = True
+        threading.Thread(target=self._open_popup, daemon=True).start()
+
+    def on_toggle_autostart(self, icon: Any = None, item: Any = None) -> None:
+        set_autostart(not is_autostart_enabled())
+
+    def on_restart(self, icon: Any = None, item: Any = None) -> None:
+        self.restart_requested = True
+        self.on_quit(icon, item)
+
+    def on_open_project(self, icon: Any = None, item: Any = None) -> None:
+        webbrowser.open(PROJECT_URL)
+
+    def on_test_reset_5h(self, icon: Any = None, item: Any = None) -> None:
+        run_event_command(ON_RESET_COMMAND, {
+            'USAGE_MONITOR_EVENT': 'reset',
+            'USAGE_MONITOR_VARIANT': 'five_hour',
+            'USAGE_MONITOR_UTILIZATION': '0',
+            'USAGE_MONITOR_PREV_UTILIZATION': '95',
+            'USAGE_MONITOR_UTILIZATION_FIVE_HOUR': '0',
+            'USAGE_MONITOR_UTILIZATION_SEVEN_DAY': '45',
+            'USAGE_MONITOR_RESETS_AT': _future_iso(hours=5),
+            'USAGE_MONITOR_TITLE': T['notify_reset_title'],
+            'USAGE_MONITOR_MESSAGE': T['notify_reset'],
+            **self.monitors[0].account_env(),
+        }, capture_output=True)
+
+    def on_test_reset_7d(self, icon: Any = None, item: Any = None) -> None:
+        run_event_command(ON_RESET_COMMAND, {
+            'USAGE_MONITOR_EVENT': 'reset',
+            'USAGE_MONITOR_VARIANT': 'seven_day',
+            'USAGE_MONITOR_UTILIZATION': '0',
+            'USAGE_MONITOR_PREV_UTILIZATION': '99',
+            'USAGE_MONITOR_UTILIZATION_FIVE_HOUR': '12',
+            'USAGE_MONITOR_UTILIZATION_SEVEN_DAY': '0',
+            'USAGE_MONITOR_RESETS_AT': _future_iso(days=7),
+            'USAGE_MONITOR_TITLE': T['notify_reset_title'],
+            'USAGE_MONITOR_MESSAGE': T['notify_reset'],
+            **self.monitors[0].account_env(),
+        }, capture_output=True)
+
+    def on_test_threshold_5h(self, icon: Any = None, item: Any = None) -> None:
+        run_event_command(ON_THRESHOLD_COMMAND, {
+            'USAGE_MONITOR_EVENT': 'threshold',
+            'USAGE_MONITOR_VARIANT': 'five_hour',
+            'USAGE_MONITOR_UTILIZATION': '82',
+            'USAGE_MONITOR_THRESHOLD': '80',
+            'USAGE_MONITOR_RESETS_AT': _future_iso(hours=3),
+            'USAGE_MONITOR_TITLE': T['notify_threshold_title'],
+            'USAGE_MONITOR_MESSAGE': T['notify_threshold_generic'].format(label=popup_label('five_hour'), pct='82'),
+            **self.monitors[0].account_env(),
+        }, capture_output=True)
+
+    def on_test_threshold_7d(self, icon: Any = None, item: Any = None) -> None:
+        run_event_command(ON_THRESHOLD_COMMAND, {
+            'USAGE_MONITOR_EVENT': 'threshold',
+            'USAGE_MONITOR_VARIANT': 'seven_day',
+            'USAGE_MONITOR_UTILIZATION': '81',
+            'USAGE_MONITOR_THRESHOLD': '80',
+            'USAGE_MONITOR_RESETS_AT': _future_iso(days=4),
+            'USAGE_MONITOR_TITLE': T['notify_threshold_title'],
+            'USAGE_MONITOR_MESSAGE': T['notify_threshold_generic'].format(label=popup_label('seven_day'), pct='81'),
+            **self.monitors[0].account_env(),
+        }, capture_output=True)
+
+    def on_test_startup(self, icon: Any = None, item: Any = None) -> None:
+        run_event_command(ON_STARTUP_COMMAND, {
+            'USAGE_MONITOR_EVENT': 'startup',
+            'USAGE_MONITOR_UTILIZATION_FIVE_HOUR': '0',
+            'USAGE_MONITOR_RESETS_AT_FIVE_HOUR': '',
+            'USAGE_MONITOR_UTILIZATION_SEVEN_DAY': '45',
+            'USAGE_MONITOR_RESETS_AT_SEVEN_DAY': _future_iso(days=3),
+            **self.monitors[0].account_env(),
+        }, capture_output=True)
+
+    def on_test_quick_action(self, icon: Any = None, item: Any = None) -> None:
+        run_event_command(QUICK_ACTION_COMMAND, {
+            'USAGE_MONITOR_EVENT': 'quick_action',
+            'USAGE_MONITOR_UTILIZATION_FIVE_HOUR': '30',
+            'USAGE_MONITOR_RESETS_AT_FIVE_HOUR': _future_iso(hours=3),
+            'USAGE_MONITOR_UTILIZATION_SEVEN_DAY': '55',
+            'USAGE_MONITOR_RESETS_AT_SEVEN_DAY': _future_iso(days=4),
+            **self.monitors[0].account_env(),
+        }, capture_output=True)
+
+    def _quick_action_menu_visible(self, item: Any = None) -> bool:
+        """Whether the menu needs to offer the quick action.
+
+        Only where the tray cannot report a double-click itself, so a
+        configured quick action stays reachable instead of being dead.
+        pystray resolves this when the menu opens, which is after the click
+        handler had its chance to install.
+        """
+        return bool(QUICK_ACTION_COMMAND) and not self.double_click_installed
+
+    def on_run_quick_action(self, icon: Any = None, item: Any = None) -> None:
+        """Run the configured quick action from the menu.
+
+        The menu is the only route to it on a desktop whose panel handles the
+        tray click itself and never passes it to the application.
+        """
+        self._run_quick_action()
+
+    def _run_quick_action(self) -> None:
+        """Run the user-configured quick action if set.
+
+        Receives the latest quota state (from the most recent successful
+        update) so the command can act on current usage, mirroring the
+        startup command's environment.  The quick action is user-driven, so
+        a command that exits with a non-zero code surfaces its
+        stderr in an error dialog (``capture_output``) instead of failing
+        silently - unlike the automatic reset/threshold/startup commands.
+        The dialog is limited to failures right after the launch
+        (``report_late_failures=False``): this command usually starts an app
+        the user keeps open, and its exit code once that app closes says
+        nothing about the command being configured correctly.
+        """
+        if not QUICK_ACTION_COMMAND:
+            return
+
+        primary = self.monitors[0]
+        env_vars = {'USAGE_MONITOR_EVENT': 'quick_action', **primary._quota_snapshot_env(primary._last_response), **primary.account_env()}
+        run_event_command(QUICK_ACTION_COMMAND, env_vars, capture_output=True, report_late_failures=False)
+
+    def on_quit(self, icon: Any = None, item: Any = None) -> None:
+        self.running = False
+        for monitor in self.monitors:
+            monitor.running = False
+            monitor.icon.stop()
+
+    # Popup
+
+    def _open_popup(self) -> None:
+        # _popup_open is set True under _popup_lock (in on_show_popup) and
+        # reset here without the lock.  This is safe because False is the
+        # permissive default - a momentary stale True only delays the next open.
+        try:
+            for monitor in self.monitors:
+                needs_profile = not monitor.cache.profile
+                needs_refresh = monitor.should_refresh_usage()
+                if needs_profile or needs_refresh:
+                    threading.Thread(target=self._refresh_monitor, args=(monitor, needs_profile, needs_refresh), daemon=True).start()
+            UsagePopup(self)
+        finally:
+            self._popup_closed_at = time.time()
+            self._popup_open = False
+
+    @staticmethod
+    def _refresh_monitor(monitor: AccountMonitor, needs_profile: bool, needs_refresh: bool) -> None:
+        # Single thread per monitor: ensure_profile() and update() both take
+        # cache._lock, so they must run sequentially.  Two threads would cause
+        # update()'s non-blocking acquire to fail while ensure_profile() holds
+        # the lock.
+        if needs_profile:
+            monitor.cache.ensure_profile()
+        if needs_refresh:
+            monitor.update()
+
+    # Theme
+
+    def _on_theme_changed(self) -> None:
+        """Re-render every tray icon when the Windows theme changes."""
+        light = taskbar_uses_light_theme()
+        if light == self._light_taskbar:
+            return
+
+        self._light_taskbar = light
+        for monitor in self.monitors:
+            if monitor._last_response:
+                monitor.render_tray()
+
+    # Lifecycle
+
     def run(self) -> None:
-        self.icon.run(setup=self._on_icon_ready)
+        """Start every tray icon and block on the primary until quit.
+
+        The first monitor's icon runs on this (the calling) thread via
+        ``icon.run()``; every other icon runs detached.  On GTK only a
+        blocking ``run()`` services a ``GLib.MainLoop`` on the default main
+        context, which is where the detached icons' ``GObject.idle_add``
+        callbacks (notifications, stop) are dispatched - ``run_detached``
+        alone starts no loop there.  On Win32 each detached icon spawns its
+        own window and message loop, so the primary carries no extra duty.
+        The primary's ``run()`` returning (after quit stops its icon) ends
+        this method.
+        """
+        if autostart_supported():
+            sync_autostart_path()
+        threading.Thread(target=watch_theme_change, args=(self._on_theme_changed,), daemon=True).start()
+        primary, *rest = self.monitors
+        for monitor in rest:
+            monitor.icon.run_detached(setup=monitor.on_icon_ready)
+        primary.icon.run(setup=primary.on_icon_ready)
 
 
 def crash_log(msg: str) -> None:

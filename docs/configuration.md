@@ -12,9 +12,8 @@ All settings work out of the box - no configuration file is needed. To customize
 
 The app searches for this file in these locations (first match wins):
 
-1. **`$CLAUDE_CONFIG_DIR/usage-monitor-settings.json`** (only if a custom config directory is set via `--config-dir` or `CLAUDE_CONFIG_DIR` and differs from `~/.claude/`) - so each instance can have its own settings. When several directories are passed in one launch, each instance reads the file in its own directory
-2. **Next to the EXE** (or project root when running from source)
-3. **`~/.claude/usage-monitor-settings.json`**
+1. **Next to the EXE** (or project root when running from source)
+2. **`~/.claude/usage-monitor-settings.json`**
 
 The app never creates or modifies this file. Settings are read at startup - after editing the file, use the **Restart** option in the tray context menu to apply changes.
 
@@ -212,6 +211,7 @@ Run a shell command when a usage event occurs. See [Event Commands](event-comman
 | `poll_fast` | `120` | Seconds when usage is actively increasing |
 | `poll_fast_extra` | `2` | Extra fast polls after usage stops increasing |
 | `poll_error` | `30` | Seconds after a transient error (5xx, network). Rate-limit errors (429) use exponential backoff instead |
+| `poll_stagger` | `5` | Seconds each additional account waits before its first poll, so several accounts do not all call the API at once on startup (0 = disable). Has no effect with a single account |
 | `max_backoff` | `900` | Maximum backoff in seconds for rate-limit errors (15 min) |
 | `idle_pause` | `300` | Seconds of inactivity before polling slows down to `idle_interval` (0 = disable). A locked workstation slows down immediately. An open detail popup keeps the normal cadence unless the lock screen or a screensaver covers it |
 | `idle_interval` | `900` | Seconds between API updates while nobody is at the machine (15 min). Quota resets and account switches are still picked up as they happen |

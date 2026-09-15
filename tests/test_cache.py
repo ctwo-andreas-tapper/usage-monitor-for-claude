@@ -8,9 +8,11 @@ snapshot consistency, and state management.
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
-from usage_monitor_for_claude.cache import CacheSnapshot, UpdateResult, UsageCache
+from usage_monitor_for_claude.account import Account
+from usage_monitor_for_claude.cache import CacheSnapshot, RateLimitBackoff, UpdateResult, UsageCache
 from usage_monitor_for_claude.claude_cli import RefreshResult
 
 _SUCCESS_DATA = {'five_hour': {'utilization': 42.0}}
@@ -18,10 +20,50 @@ _ERROR_DATA = {'error': 'server down'}
 _AUTH_ERROR_DATA = {'error': 'expired', 'auth_error': True}
 _SERVER_MSG_DATA = {'error': 'HTTP 429', 'server_message': 'Rate limited.'}
 
+_ACCOUNT = Account(Path('/claude/test'), 'test')
+
 
 def _make_cache() -> UsageCache:
-    """Create a fresh UsageCache instance."""
-    return UsageCache()
+    """Create a fresh UsageCache for the test account."""
+    return UsageCache(_ACCOUNT)
+
+
+# ---------------------------------------------------------------------------
+# Account pass-through
+# ---------------------------------------------------------------------------
+
+class TestAccountPassThrough(unittest.TestCase):
+    """Every credential-touching call names the cache's account."""
+
+    @patch('usage_monitor_for_claude.cache.read_access_token', return_value='tok')
+    @patch('usage_monitor_for_claude.cache.fetch_usage', return_value=_SUCCESS_DATA)
+    def test_update_passes_account(self, mock_fetch, mock_token):
+        _make_cache().update()
+        mock_fetch.assert_called_once_with(_ACCOUNT)
+        mock_token.assert_called_with(_ACCOUNT)
+
+    @patch('usage_monitor_for_claude.cache.read_access_token', return_value='tok')
+    @patch('usage_monitor_for_claude.cache.fetch_profile', return_value={'account': {'uuid': 'u'}})
+    def test_ensure_profile_passes_account(self, mock_profile, _mock_token):
+        _make_cache().ensure_profile()
+        mock_profile.assert_called_once_with(_ACCOUNT)
+
+    @patch('usage_monitor_for_claude.cache.read_access_token', return_value='tok')
+    @patch('usage_monitor_for_claude.cache.fetch_prepaid_credits', return_value=None)
+    @patch('usage_monitor_for_claude.cache.fetch_usage', return_value={'five_hour': {'utilization': 1}, 'extra_usage': {'is_enabled': True}})
+    def test_prepaid_passes_account(self, _mock_fetch, mock_prepaid, _mock_token):
+        cache = _make_cache()
+        cache._profile = {'organization': {'uuid': '12345678-1234-1234-1234-123456789abc'}}
+        cache.update()
+        mock_prepaid.assert_called_once_with(_ACCOUNT, '12345678-1234-1234-1234-123456789abc')
+
+    @patch('usage_monitor_for_claude.cache.refresh_token')
+    @patch('usage_monitor_for_claude.cache.read_access_token', return_value='tok-a')
+    @patch('usage_monitor_for_claude.cache.fetch_usage', return_value=_AUTH_ERROR_DATA)
+    def test_refresh_passes_account(self, _mock_fetch, _mock_token, mock_refresh):
+        mock_refresh.return_value = RefreshResult(success=False, updated=False, old_version='', new_version='', error='x')
+        _make_cache().update()
+        mock_refresh.assert_called_once_with(_ACCOUNT)
 
 
 # ---------------------------------------------------------------------------
@@ -167,12 +209,12 @@ class TestCooldownBehavior(unittest.TestCase):
         """After a backward clock jump, the remaining 429 backoff is capped to
         MAX_BACKOFF instead of lasting until the pre-jump timestamp."""
         cache = _make_cache()
-        cache._rate_limit_until = 10000.0
+        cache._rate_limit.extend_to(10000.0)
 
         mock_time.time.return_value = 5000.0
         cache.update()
 
-        self.assertLessEqual(cache._rate_limit_until - 5000.0, 900)
+        self.assertLessEqual(cache._rate_limit.until - 5000.0, 900)
 
 
 # ---------------------------------------------------------------------------
@@ -325,7 +367,7 @@ class TestRefreshingFlag(unittest.TestCase):
         cache = _make_cache()
         observed = []
 
-        def capture():
+        def capture(account):
             observed.append(cache.refreshing)
             return _SUCCESS_DATA
 
@@ -390,7 +432,7 @@ class TestFailedTokenGuard(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestRateLimitGuard(unittest.TestCase):
-    """Tests for _rate_limit_until preventing calls during 429 backoff."""
+    """Tests for the shared 429 backoff preventing calls during a rate limit."""
 
     @patch('usage_monitor_for_claude.cache.fetch_usage', return_value={'error': 'HTTP 429', 'rate_limited': True})
     @patch('usage_monitor_for_claude.cache.time')
@@ -544,7 +586,7 @@ class TestRateLimitRemaining(unittest.TestCase):
     def test_active_rate_limit(self, mock_time):
         """Returns remaining seconds when rate limit is active."""
         cache = _make_cache()
-        cache._rate_limit_until = 1300.0
+        cache._rate_limit.extend_to(1300.0)
         mock_time.time.return_value = 1000.0
         self.assertAlmostEqual(cache.rate_limit_remaining, 300.0)
 
@@ -552,7 +594,7 @@ class TestRateLimitRemaining(unittest.TestCase):
     def test_expired_rate_limit(self, mock_time):
         """Returns 0 when rate limit has expired."""
         cache = _make_cache()
-        cache._rate_limit_until = 1000.0
+        cache._rate_limit.extend_to(1000.0)
         mock_time.time.return_value = 1100.0
         self.assertEqual(cache.rate_limit_remaining, 0)
 
@@ -856,7 +898,7 @@ class TestEnsureProfile(unittest.TestCase):
     def test_skips_during_rate_limit_backoff(self, mock_time, mock_fetch):
         """ensure_profile() does not fetch while the 429 backoff window is active."""
         cache = _make_cache()
-        cache._rate_limit_until = 1300.0
+        cache._rate_limit.extend_to(1300.0)
         mock_time.time.return_value = 1000.0
 
         cache.ensure_profile()
@@ -869,7 +911,7 @@ class TestEnsureProfile(unittest.TestCase):
     def test_bypass_rate_limit_fetches_during_backoff(self, mock_time, mock_fetch):
         """ensure_profile(bypass_rate_limit=True) fetches even while the 429 backoff is active."""
         cache = _make_cache()
-        cache._rate_limit_until = 1300.0
+        cache._rate_limit.extend_to(1300.0)
         mock_time.time.return_value = 1000.0
 
         cache.ensure_profile(bypass_rate_limit=True)
@@ -882,7 +924,7 @@ class TestEnsureProfile(unittest.TestCase):
     def test_fetches_after_rate_limit_expires(self, mock_time, mock_fetch):
         """ensure_profile() fetches once the 429 backoff window has elapsed."""
         cache = _make_cache()
-        cache._rate_limit_until = 1300.0
+        cache._rate_limit.extend_to(1300.0)
         mock_time.time.return_value = 1400.0
 
         cache.ensure_profile()
@@ -898,7 +940,7 @@ class TestEnsureProfile(unittest.TestCase):
         cache = _make_cache()
         cache._profile = {'name': 'Old User'}
         cache._profile_token = 'token-a'
-        cache._rate_limit_until = 1300.0
+        cache._rate_limit.extend_to(1300.0)
         mock_time.time.return_value = 1000.0
 
         cache.ensure_profile()
@@ -1011,7 +1053,7 @@ class TestPrepaidBalance(unittest.TestCase):
 
         cache.update()
 
-        mock_prepaid.assert_called_once_with('org-uuid-1')
+        mock_prepaid.assert_called_once_with(_ACCOUNT, 'org-uuid-1')
         self.assertEqual(cache.prepaid, _PREPAID_BALANCE)
         self.assertEqual(cache.snapshot.prepaid, _PREPAID_BALANCE)
 
@@ -1081,7 +1123,7 @@ class TestPrepaidBalance(unittest.TestCase):
 
         cache.update()
 
-        mock_prepaid.assert_called_once_with('org-uuid-1')
+        mock_prepaid.assert_called_once_with(_ACCOUNT, 'org-uuid-1')
         self.assertEqual(cache.prepaid, _PREPAID_BALANCE)
 
     @patch('usage_monitor_for_claude.cache.fetch_prepaid_credits')
@@ -1161,6 +1203,73 @@ class TestEnsureProfileTokenChange(unittest.TestCase):
         # Third call: same token-b, should not re-fetch
         cache.ensure_profile()
         mock_profile.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# RateLimitBackoff
+# ---------------------------------------------------------------------------
+
+
+class TestRateLimitBackoff(unittest.TestCase):
+    """Tests for one account's 429 backoff primitive."""
+
+    def test_until_defaults_to_zero(self):
+        """A fresh backoff imposes no wait."""
+        self.assertEqual(RateLimitBackoff().until, 0.0)
+
+    def test_extend_to_only_pushes_out(self):
+        """An earlier deadline never shortens an active backoff."""
+        backoff = RateLimitBackoff()
+        backoff.extend_to(1000.0)
+        backoff.extend_to(500.0)
+        self.assertEqual(backoff.until, 1000.0)
+        backoff.extend_to(1500.0)
+        self.assertEqual(backoff.until, 1500.0)
+
+    def test_clamp_lowers_only_when_above_ceiling(self):
+        """clamp() lowers the deadline past a ceiling but leaves a lower one alone."""
+        backoff = RateLimitBackoff()
+        backoff.extend_to(1000.0)
+        backoff.clamp(1200.0)
+        self.assertEqual(backoff.until, 1000.0)
+        backoff.clamp(400.0)
+        self.assertEqual(backoff.until, 400.0)
+
+    def test_reset_clears(self):
+        """reset() drops the backoff so the next fetch is allowed."""
+        backoff = RateLimitBackoff()
+        backoff.extend_to(1000.0)
+        backoff.reset()
+        self.assertEqual(backoff.until, 0.0)
+
+
+class TestBackoffIsPerAccount(unittest.TestCase):
+    """The usage limit is per account, so one account's 429 never pauses another."""
+
+    @patch('usage_monitor_for_claude.cache.time')
+    def test_one_account_429_does_not_pause_another(self, mock_time):
+        """A rate limit on cache A leaves cache B free to fetch."""
+        mock_time.time.return_value = 1000.0
+        cache_a = UsageCache(Account(Path('/claude/a'), 'a'))
+        cache_b = UsageCache(Account(Path('/claude/b'), 'b'))
+
+        with patch('usage_monitor_for_claude.cache.fetch_usage',
+                   return_value={'error': 'HTTP 429', 'rate_limited': True}) as fetch_a:
+            cache_a.update()
+        fetch_a.assert_called_once()
+        self.assertGreater(cache_a.rate_limit_remaining, 0)
+
+        with patch('usage_monitor_for_claude.cache.fetch_usage', return_value=_SUCCESS_DATA) as fetch_b:
+            result = cache_b.update()
+        fetch_b.assert_called_once()
+        self.assertIsNotNone(result.data)
+        self.assertEqual(cache_b.rate_limit_remaining, 0)
+
+    def test_each_cache_has_its_own_backoff(self):
+        """Each cache owns its backoff object."""
+        cache_a = UsageCache(Account(Path('/claude/a'), 'a'))
+        cache_b = UsageCache(Account(Path('/claude/b'), 'b'))
+        self.assertIsNot(cache_a._rate_limit, cache_b._rate_limit)
 
 
 if __name__ == '__main__':

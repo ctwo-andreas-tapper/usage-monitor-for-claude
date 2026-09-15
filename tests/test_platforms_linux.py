@@ -330,7 +330,7 @@ class TestAutostart(unittest.TestCase):
         self.addCleanup(patcher.stop)
         self.addCleanup(self._tmp.cleanup)
 
-        suffix = patch.object(linux, 'autostart_suffix', return_value='')
+        suffix = patch.object(linux, 'launch_suffix', return_value='')
         suffix.start()
         self.addCleanup(suffix.stop)
 
@@ -364,7 +364,7 @@ class TestAutostart(unittest.TestCase):
 
     def test_config_dir_gets_own_entry(self):
         """A second monitored account writes a separate entry."""
-        with patch.object(linux, 'autostart_suffix', return_value='-abc123'):
+        with patch.object(linux, 'launch_suffix', return_value='-abc123'):
             linux.set_autostart(True)
             self.assertTrue((self.directory / 'usage-monitor-for-claude-abc123.desktop').is_file())
         self.assertFalse(linux.is_autostart_enabled())

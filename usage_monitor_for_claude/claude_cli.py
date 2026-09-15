@@ -14,7 +14,9 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
+from .account import Account
 from .platforms import no_window_kwargs
 from .settings import CLI_COMMAND
 
@@ -166,14 +168,23 @@ def find_installations() -> list[ClaudeInstallation]:
     return results
 
 
-def refresh_token() -> RefreshResult:
-    """Run ``claude update`` to refresh the OAuth token.
+def refresh_token(account: Account) -> RefreshResult:
+    """Run ``claude update`` to refresh *account*'s OAuth token.
 
     Uses the native CLI binary only - a ``cli_command`` entry is display
     only.  The refresh works because the CLI renews the expired token in
     the credentials file this app reads; a CLI behind ``cli_command``
     (e.g. a WSL install) keeps its own credentials inside WSL and would
     leave that file untouched, so the token would never change.
+
+    The CLI is started with ``CLAUDE_CONFIG_DIR`` pointing at the account's
+    directory, so the token it renews is the one this app reads for that
+    account.
+
+    Parameters
+    ----------
+    account : Account
+        The account whose credentials file the CLI must renew.
 
     Returns
     -------
@@ -183,8 +194,9 @@ def refresh_token() -> RefreshResult:
     if not CLAUDE_CLI_PATH.is_file():
         return RefreshResult(success=False, updated=False, old_version='', new_version='', error='CLI not found')
 
+    cli_env = {**os.environ, 'CLAUDE_CONFIG_DIR': str(account.config_dir)}
     try:
-        proc = _run_cli([str(CLAUDE_CLI_PATH), 'update'], timeout=60)
+        proc = _run_cli([str(CLAUDE_CLI_PATH), 'update'], timeout=60, env=cli_env)
     except subprocess.TimeoutExpired:
         return RefreshResult(success=False, updated=False, old_version='', new_version='', error='Timeout')
     except OSError as e:
@@ -258,7 +270,7 @@ def _command_version(command: list[str]) -> str:
     return version
 
 
-def _run_cli(command: list[str], timeout: int) -> subprocess.CompletedProcess[str]:
+def _run_cli(command: list[str], timeout: int, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     """Run a Claude CLI command and capture its output as UTF-8 text.
 
     The Claude CLI is a Node application and writes UTF-8 whatever the
@@ -275,6 +287,8 @@ def _run_cli(command: list[str], timeout: int) -> subprocess.CompletedProcess[st
         Executable and arguments to run.
     timeout : int
         Seconds to wait for the command to finish.
+    env : dict[str, str] | None
+        Environment for the child; None inherits the current one.
 
     Returns
     -------
@@ -288,10 +302,14 @@ def _run_cli(command: list[str], timeout: int) -> subprocess.CompletedProcess[st
     OSError
         The command could not be started, or a stream was lost.
     """
+    run_kwargs: dict[str, Any] = {}
+    if env is not None:
+        run_kwargs['env'] = env
+
     proc = subprocess.run(
         command,
         capture_output=True, text=True, encoding='utf-8', errors='replace',
-        timeout=timeout, **no_window_kwargs(),
+        timeout=timeout, **run_kwargs, **no_window_kwargs(),
     )
 
     # A missing stream means the output was lost, not that it was empty.  An

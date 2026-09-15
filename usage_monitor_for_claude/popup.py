@@ -65,118 +65,146 @@ def _prepaid_balance_text(prepaid: dict[str, Any] | None) -> str:
     return T['extra_usage_balance'].format(balance=balance)
 
 
-def _snapshot_to_dict(
-    snap: CacheSnapshot, installations: list[dict[str, str]] | None = None, next_poll_time: float | None = None,
-) -> dict[str, Any]:
-    """Convert a CacheSnapshot to a JSON-serializable dict for the popup JS.
-
-    Parameters
-    ----------
-    snap : CacheSnapshot
-        Immutable snapshot of the cache state.
-    installations : list or None
-        Pre-computed installation list, or None to detect now.
-    next_poll_time : float or None
-        Unix timestamp of the next scheduled API poll.
-    """
-    # Profile - truthiness check (not `is not None`): hides the account section when the API
-    # returns an empty or incomplete response, instead of rendering empty Email/Plan fields.
-    profile = None
-    if snap.profile:
-        account = snap.profile.get('account') or {}
-        org = snap.profile.get('organization') or {}
-        profile = {
-            'email': account.get('email', ''),
-            'plan': org.get('organization_type', '').replace('_', ' ').title(),
-        }
-
-    # Usage bars
-    usage = []
-    if snap.usage:
-        for label, entry, period, field in _usage_entries(snap.usage):
-            if not entry or entry.get('utilization') is None:
-                continue
-            pct = entry.get('utilization', 0) or 0
-            resets_at = entry.get('resets_at', '')
-            time_pct = elapsed_pct(resets_at, period) if period else None
-            warn = pct >= 100 or (time_pct is not None and pct > time_pct)
-            marker_rel = max(0.0, min(1.0, time_pct / 100)) if time_pct is not None else None
-
-            usage.append({
-                'key': field,
-                'label': label,
-                'pct_text': f'{pct:.0f}%',
-                'fill_pct': max(0.0, min(1.0, pct / 100)),
-                'warn': warn,
-                'reset_text': time_until(resets_at) if resets_at else '',
-                'dividers': divider_positions(resets_at, period) if period else [],
-                'marker_rel': marker_rel,
-            })
-
-    # Extra usage
-    extra = None
-    if snap.usage:
-        extra_data = snap.usage.get('extra_usage')
-        if extra_data and extra_data.get('is_enabled'):
-            used = extra_data.get('used_credits')
-            if used is not None:
-                limit = extra_data.get('monthly_limit', 0) or 0
-                currency = extra_data.get('currency')
-                decimal_places = extra_data.get('decimal_places')
-                balance_text = _prepaid_balance_text(snap.prepaid)
-                if limit > 0:
-                    pct = used / limit * 100
-                    extra = {
-                        'has_limit': True,
-                        'pct_text': f'{pct:.0f}%',
-                        'fill_pct': max(0.0, min(1.0, pct / 100)),
-                        'spent_text': T['extra_usage_spent'].format(
-                            used=format_credits(used, currency, decimal_places),
-                            limit=format_credits(limit, currency, decimal_places),
-                        ),
-                        'balance_text': balance_text,
-                    }
-                else:
-                    # No monthly cap (e.g. uncapped pay-as-you-go credits) - show
-                    # what has been spent without a percentage bar to imply a limit.
-                    extra = {
-                        'has_limit': False,
-                        'pct_text': '',
-                        'fill_pct': 0.0,
-                        'spent_text': T['extra_usage_spent_no_limit'].format(
-                            used=format_credits(used, currency, decimal_places),
-                        ),
-                        'balance_text': balance_text,
-                    }
-
-    # Installations
-    if installations is None:
-        installations = [{'name': i.name, 'version': i.version} for i in find_installations()]
-
-    # Status - pass raw timestamps for JS live timer; fallback text for initial load
-    if not snap.usage:
-        if snap.last_error:
-            status: dict[str, Any] = {'text': snap.last_error[:120], 'is_error': True}
-        else:
-            status = {'text': T['status_refreshing'], 'is_error': False, 'refreshing': True}
-    else:
-        status = {
-            'last_success_time': snap.last_success_time,
-            'next_poll_time': next_poll_time,
-            'refreshing': snap.refreshing,
-            'error': snap.last_error[:120] if snap.last_error else None,
-        }
-
+def _bar(field: str, label: str, entry: dict[str, Any] | None, period: int | None, account_index: int) -> dict[str, Any] | None:
+    """Return one bar dict for *entry*, or None when the field has no utilization."""
+    if not entry or entry.get('utilization') is None:
+        return None
+    pct = entry.get('utilization', 0) or 0
+    resets_at = entry.get('resets_at', '')
+    time_pct = elapsed_pct(resets_at, period) if period else None
+    warn = pct >= 100 or (time_pct is not None and pct > time_pct)
+    marker_rel = max(0.0, min(1.0, time_pct / 100)) if time_pct is not None else None
     return {
-        'profile': profile,
-        'usage': usage,
-        'extra': extra,
-        'installations': installations,
-        'status': status,
+        'key': field, 'label': label, 'account_index': account_index,
+        'pct_text': f'{pct:.0f}%', 'fill_pct': max(0.0, min(1.0, pct / 100)), 'warn': warn,
+        'reset_text': time_until(resets_at) if resets_at else '',
+        'dividers': divider_positions(resets_at, period) if period else [],
+        'marker_rel': marker_rel,
     }
 
 
-def _init_config(snap: CacheSnapshot, next_poll_time: float | None = None) -> dict[str, Any]:
+def _extra_entry(snap: CacheSnapshot, account_index: int) -> dict[str, Any] | None:
+    """Return the extra-usage dict for one account, or None when not enabled."""
+    if not snap.usage:
+        return None
+
+    extra_data = snap.usage.get('extra_usage')
+    if not (extra_data and extra_data.get('is_enabled')):
+        return None
+
+    used = extra_data.get('used_credits')
+    if used is None:
+        return None
+
+    limit = extra_data.get('monthly_limit', 0) or 0
+    currency = extra_data.get('currency')
+    decimal_places = extra_data.get('decimal_places')
+    balance_text = _prepaid_balance_text(snap.prepaid)
+
+    if limit > 0:
+        pct = used / limit * 100
+        return {
+            'account_index': account_index,
+            'has_limit': True,
+            'pct_text': f'{pct:.0f}%',
+            'fill_pct': max(0.0, min(1.0, pct / 100)),
+            'spent_text': T['extra_usage_spent'].format(
+                used=format_credits(used, currency, decimal_places),
+                limit=format_credits(limit, currency, decimal_places),
+            ),
+            'balance_text': balance_text,
+        }
+
+    # No monthly cap (e.g. uncapped pay-as-you-go credits) - show what has been
+    # spent without a percentage bar to imply a limit.
+    return {
+        'account_index': account_index,
+        'has_limit': False,
+        'pct_text': '',
+        'fill_pct': 0.0,
+        'spent_text': T['extra_usage_spent_no_limit'].format(
+            used=format_credits(used, currency, decimal_places),
+        ),
+        'balance_text': balance_text,
+    }
+
+
+def _account_entry(index: int, monitor: Any, snap: CacheSnapshot) -> dict[str, Any]:
+    """Build one account row: label, email, plan and any account-level error."""
+    account = (snap.profile or {}).get('account') or {} if snap.profile else {}
+    org = (snap.profile or {}).get('organization') or {} if snap.profile else {}
+    error = snap.last_error[:120] if (not snap.usage and snap.last_error) else None
+    return {
+        'index': index, 'label': monitor.account.label,
+        'email': account.get('email', ''), 'plan': org.get('organization_type', '').replace('_', ' ').title(),
+        'error': error, 'refreshing': not snap.usage and not error,
+    }
+
+
+def _combined_usage(snaps: list[CacheSnapshot]) -> dict[str, Any]:
+    """Merge every account's usage so the field order can be derived once (first non-null wins)."""
+    combined: dict[str, Any] = {}
+    for snap in snaps:
+        for key, value in snap.usage.items():
+            if key not in combined or combined[key] is None:
+                combined[key] = value
+    return combined
+
+
+def _account_bars(snap: CacheSnapshot, field_order: list[str], account_index: int) -> list[dict[str, Any]]:
+    """Return one account's quota bars, in the shared field order."""
+    bars = []
+    for field in field_order:
+        entry = snap.usage.get(field) if snap.usage else None
+        bar = _bar(field, popup_label(field), entry, field_period(field), account_index)
+        if bar is not None:
+            bars.append(bar)
+    return bars
+
+
+def _popup_data(monitors: list[Any], installations: list[dict[str, str]] | None = None) -> dict[str, Any]:
+    """Build the JSON payload for popup.js from every account's snapshot.
+
+    Each account carries its own quota bars and extra-usage entry so the
+    popup renders one section per account.  Field order is shared across
+    accounts (the union of every account's fields, canonical order) so the
+    same quota lines up in the same place in each account's section.
+    """
+    snaps = [monitor.cache.snapshot for monitor in monitors]
+    field_order = expand_popup_fields(POPUP_FIELDS, _combined_usage(snaps))
+
+    accounts = []
+    for index, (monitor, snap) in enumerate(zip(monitors, snaps)):
+        account = _account_entry(index, monitor, snap)
+        account['bars'] = _account_bars(snap, field_order, index)
+        account['extra'] = _extra_entry(snap, index)
+        accounts.append(account)
+
+    if installations is None:
+        installations = [{'name': i.name, 'version': i.version} for i in find_installations()]
+
+    with_data = [snap for snap in snaps if snap.usage]
+    if not with_data:
+        first_error = next((snap.last_error for snap in snaps if snap.last_error), None)
+        if first_error:
+            status: dict[str, Any] = {'text': first_error[:120], 'is_error': True}
+        else:
+            status = {'text': T['status_refreshing'], 'is_error': False, 'refreshing': True}
+    else:
+        success_times = [snap.last_success_time for snap in with_data if snap.last_success_time is not None]
+        poll_times = [monitor._next_poll_time for monitor in monitors if monitor._next_poll_time is not None]
+        first_error = next((snap.last_error for snap in snaps if snap.last_error), None)
+        status = {
+            'last_success_time': min(success_times) if success_times else None,
+            'next_poll_time': min(poll_times) if poll_times else None,
+            'refreshing': any(snap.refreshing for snap in snaps),
+            'error': first_error[:120] if first_error else None,
+        }
+
+    return {'accounts': accounts, 'installations': installations, 'status': status}
+
+
+def _init_config(monitors: list[Any]) -> dict[str, Any]:
     """Build the config object passed to JS ``init()`` after the page loads."""
     return {
         'colors': {
@@ -184,7 +212,7 @@ def _init_config(snap: CacheSnapshot, next_poll_time: float | None = None) -> di
             'bar_bg': BAR_BG, 'bar_fg': BAR_FG, 'bar_fg_warn': BAR_FG_WARN, 'bar_divider': BAR_DIVIDER, 'bar_marker': BAR_MARKER,
         },
         't': {
-            'title': T['popup_title'], 'account': T['account'], 'email': T['email'], 'plan': T['plan'],
+            'title': T['popup_title'], 'account': T['account'], 'accounts': T['accounts'], 'email': T['email'], 'plan': T['plan'],
             'usage': T['usage'], 'extra_usage': T['extra_usage'],
             'claude_code': T['claude_code'], 'changelog': T['changelog'],
             'pin_popup': T['pin_popup'], 'unpin_popup': T['unpin_popup'],
@@ -194,7 +222,7 @@ def _init_config(snap: CacheSnapshot, next_poll_time: float | None = None) -> di
         },
         'app_version': __version__,
         'compact_hide': COMPACT_HIDE,
-        'data': _snapshot_to_dict(snap, next_poll_time=next_poll_time),
+        'data': _popup_data(monitors),
     }
 
 
@@ -239,7 +267,7 @@ class _PopupApi:
 # ---------------------------------------------------------------------------
 
 class UsagePopup:
-    """Dark-themed HTML popup window showing account info and usage bars."""
+    """Dark-themed HTML popup window showing every monitored account and its usage bars."""
 
     WIDTH = 340
     _CHECK_MS = 2000
@@ -269,7 +297,7 @@ class UsagePopup:
         # as a change so the window gets resized, positioned and shown even
         # when the content is exactly _INITIAL_HEIGHT tall.
         self._last_height = 0
-        self._last_version = app.cache.snapshot.version
+        self._last_versions = self._versions()
 
         self._window = webview.create_window(
             '', url=popup_url(_POPUP_DIR / 'popup.html'),
@@ -295,9 +323,12 @@ class UsagePopup:
         """
         threading.Thread(target=self._initialise, daemon=True).start()
 
+    def _versions(self) -> tuple[Any, ...]:
+        return tuple((monitor.cache.snapshot.version, monitor._next_poll_time) for monitor in self.app.monitors)
+
     def _initialise(self) -> None:
         """Inject the config, then size and show the window."""
-        config = _init_config(self.app.cache.snapshot, next_poll_time=self.app._next_poll_time)
+        config = _init_config(self.app.monitors)
         self._window.evaluate_js(f'init({json.dumps(config)})')
 
         self._host.prepare()
@@ -390,25 +421,23 @@ class UsagePopup:
     def _update_loop(self) -> None:
         """Poll for data changes and push updates to the popup."""
         cached_installations = [{'name': i.name, 'version': i.version} for i in find_installations()]
-        last_next_poll_time = self.app._next_poll_time
         while self._running:
             time.sleep(self._CHECK_MS / 1000)
             if not self._running:
                 break
             try:
-                snap = self.app.cache.snapshot
-                next_poll_time = self.app._next_poll_time
-                if snap.version == self._last_version and next_poll_time == last_next_poll_time:
+                versions = self._versions()
+                if versions == self._last_versions:
                     continue
-                if snap.version != self._last_version:
+                snapshot_versions = tuple(version for version, _ in versions)
+                if snapshot_versions != tuple(version for version, _ in self._last_versions):
                     cached_installations = [{'name': i.name, 'version': i.version} for i in find_installations()]
-                data = _snapshot_to_dict(snap, installations=cached_installations, next_poll_time=next_poll_time)
+                data = _popup_data(self.app.monitors, installations=cached_installations)
                 self._window.evaluate_js(f'updateData({json.dumps(data)})')
                 # Commit the markers only after a successful push, so a failed
                 # update is retried on the next tick instead of being skipped
                 # by the dedup check until the next data change.
-                self._last_version = snap.version
-                last_next_poll_time = next_poll_time
+                self._last_versions = versions
             except Exception:
                 # A transient failure (snapshot conversion, filesystem scan,
                 # one-off evaluate_js hiccup) must not end the update stream -

@@ -15,6 +15,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+from .account import Account
 from .api import fetch_prepaid_credits, fetch_profile, fetch_usage, read_access_token
 from .claude_cli import RefreshResult, refresh_token
 from .settings import MAX_BACKOFF, POLL_FAST, POLL_INTERVAL
@@ -60,14 +61,53 @@ class UpdateResult:
     token: str | None = None
 
 
+class RateLimitBackoff:
+    """One account's 429 backoff window.
+
+    The Anthropic usage endpoint rate-limits per account (per token), not
+    per host: at the same instant one account can be 429-limited while
+    another returns 200.  So each cache owns its own backoff - a 429 on one
+    account never holds back another.  The deadline is only ever pushed out
+    by a throttled fetch and cleared by a successful one.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._until: float = 0.0
+
+    @property
+    def until(self) -> float:
+        """Absolute time until which this account must hold off, or 0."""
+        return self._until
+
+    def extend_to(self, deadline: float) -> None:
+        """Push the backoff out to ``deadline``, never pulling it in."""
+        with self._lock:
+            self._until = max(self._until, deadline)
+
+    def clamp(self, ceiling: float) -> None:
+        """Lower the backoff to ``ceiling`` after a backward clock jump."""
+        with self._lock:
+            if self._until > ceiling:
+                self._until = ceiling
+
+    def reset(self) -> None:
+        """Clear the backoff after a successful fetch."""
+        with self._lock:
+            self._until = 0.0
+
+
 class UsageCache:
     """Thread-safe cache managing API data, cooldown, and error state.
 
     All callers (poll loop, popup) go through ``update()`` instead
-    of calling ``fetch_usage()`` directly.
+    of calling ``fetch_usage()`` directly.  One cache exists per
+    monitored account, each with its own ``RateLimitBackoff`` so one
+    account's 429 never holds back another (the usage limit is per account).
     """
 
-    def __init__(self) -> None:
+    def __init__(self, account: Account, rate_limit: RateLimitBackoff | None = None) -> None:
+        self.account = account
         self._lock = threading.Lock()
         self._state_lock = threading.Lock()
         self._profile_lock = threading.Lock()
@@ -82,7 +122,7 @@ class UsageCache:
         self._version = 0
         self._consecutive_errors = 0
         self._last_failed_token: str | None = None
-        self._rate_limit_until: float = 0
+        self._rate_limit = rate_limit if rate_limit is not None else RateLimitBackoff()
 
     # Public properties
 
@@ -124,7 +164,7 @@ class UsageCache:
     @property
     def rate_limit_remaining(self) -> float:
         """Seconds remaining in the rate-limit backoff window, or 0."""
-        return max(self._rate_limit_until - time.time(), 0)
+        return max(self._rate_limit.until - time.time(), 0)
 
     @property
     def snapshot(self) -> CacheSnapshot:
@@ -158,12 +198,12 @@ class UsageCache:
             account has its own quota and cannot be the source of the
             backoff, so its identity must be readable right away.
         """
-        current_token = read_access_token()
+        current_token = read_access_token(self.account)
         if self._profile is not None and self._profile_token == current_token:
             return
 
         with self._profile_lock:
-            current_token = read_access_token()
+            current_token = read_access_token(self.account)
             if self._profile is not None and self._profile_token == current_token:
                 return
 
@@ -171,13 +211,13 @@ class UsageCache:
             # leaves _profile as None, so without this guard every popup open
             # would re-fire a request against an already 429-limited endpoint
             # and could prolong the backoff.
-            if not bypass_rate_limit and time.time() < self._rate_limit_until:
-                log.debug('ensure_profile skipped (rate-limit backoff, %.0fs remaining)', self._rate_limit_until - time.time())
+            if not bypass_rate_limit and time.time() < self._rate_limit.until:
+                log.debug('ensure_profile skipped (rate-limit backoff, %.0fs remaining)', self._rate_limit.until - time.time())
                 return
 
             log.info('fetch_profile started')
             with self._lock:
-                profile = fetch_profile()
+                profile = fetch_profile(self.account)
             with self._state_lock:
                 self._profile = profile
                 self._profile_token = current_token
@@ -224,19 +264,19 @@ class UsageCache:
         now = time.time()
         if self._last_success_time is not None and now < self._last_success_time:
             self._last_success_time = now - POLL_FAST
-        if self._rate_limit_until - now > MAX_BACKOFF:
-            self._rate_limit_until = now + MAX_BACKOFF
+        if self._rate_limit.until - now > MAX_BACKOFF:
+            self._rate_limit.clamp(now + MAX_BACKOFF)
 
         if not force and self._last_success_time is not None and time.time() - self._last_success_time < POLL_FAST:
             log.debug('update skipped (cooldown, %.0fs remaining)', POLL_FAST - (time.time() - self._last_success_time))
             return UpdateResult(data=None)
 
-        if not force and time.time() < self._rate_limit_until:
-            log.debug('update skipped (rate-limit backoff, %.0fs remaining)', self._rate_limit_until - time.time())
+        if not force and time.time() < self._rate_limit.until:
+            log.debug('update skipped (rate-limit backoff, %.0fs remaining)', self._rate_limit.until - time.time())
             return UpdateResult(data=None)
 
         if self._last_failed_token is not None:
-            if read_access_token() == self._last_failed_token:
+            if read_access_token(self.account) == self._last_failed_token:
                 log.debug('update skipped (token unchanged after auth failure)')
                 return UpdateResult(data=None)
             self._last_failed_token = None
@@ -255,9 +295,9 @@ class UsageCache:
 
     def _fetch_and_process(self) -> UpdateResult:
         """Fetch usage data and process the response."""
-        token_before = read_access_token()
+        token_before = read_access_token(self.account)
         log.info('fetch_usage started')
-        data = fetch_usage()
+        data = fetch_usage(self.account)
 
         if 'error' in data:
             self._record_error(data)
@@ -317,7 +357,7 @@ class UsageCache:
         if not org_uuid:
             return None
 
-        prepaid = fetch_prepaid_credits(org_uuid)
+        prepaid = fetch_prepaid_credits(self.account, org_uuid)
         log.debug('fetch_prepaid_credits -> %s', 'OK' if prepaid else 'unavailable')
 
         return prepaid
@@ -334,7 +374,7 @@ class UsageCache:
             delay = min(max(retry_after, POLL_INTERVAL), MAX_BACKOFF)
         else:
             delay = min(POLL_INTERVAL * (2 ** max(self._consecutive_errors - 1, 0)), MAX_BACKOFF)
-        self._rate_limit_until = time.time() + delay
+        self._rate_limit.extend_to(time.time() + delay)
         log.warning('fetch_usage -> rate limited, backoff %.0fs', delay)
 
     def _record_error(self, data: dict[str, Any], *, count: bool = True) -> None:
@@ -375,7 +415,7 @@ class UsageCache:
             self._consecutive_errors = 0
             self._last_error = None
             self._last_success_time = time.time()
-            self._rate_limit_until = 0
+            self._rate_limit.reset()
             self._last_failed_token = None
             self._usage = data
             self._usage_token = token
@@ -407,15 +447,15 @@ class UsageCache:
         """
         result = RefreshResult(success=True, updated=False, old_version='', new_version='', error='')
 
-        current_token = read_access_token()
+        current_token = read_access_token(self.account)
         if current_token in (token_before, None):
             # Token unchanged - refresh it via the CLI (claude update).
-            result = refresh_token()
+            result = refresh_token(self.account)
             if not result.success:
                 log.info('token refresh failed: %s', result.error)
                 return None, None
 
-            current_token = read_access_token()
+            current_token = read_access_token(self.account)
             if current_token == token_before:
                 log.info('token refresh succeeded but token unchanged')
                 return None, None
@@ -424,7 +464,7 @@ class UsageCache:
         else:
             log.info('token already changed, retrying fetch_usage without CLI refresh')
 
-        data = fetch_usage()
+        data = fetch_usage(self.account)
         if 'error' not in data:
             log.info('retry -> OK')
             self._record_success(data, current_token, self._fetch_prepaid_balance(data))

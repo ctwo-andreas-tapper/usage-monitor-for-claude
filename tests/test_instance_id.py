@@ -2,11 +2,12 @@
 Instance Identity Tests
 ========================
 
-Unit tests for --config-dir parsing, per-instance name suffixes and the
-launch-set helpers behind the autostart entry.
+Unit tests for --config-dir parsing, the resolved config-directory set and
+the single launch suffix behind the mutex and autostart entry.
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import sys
 import unittest
@@ -15,8 +16,8 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from usage_monitor_for_claude.instance_id import (
-    CONFIG_DIR_SEPARATOR, LAUNCH_CONFIG_DIRS_ENV, autostart_config_dir_argument, autostart_suffix, config_dir_suffix,
-    effective_config_dir, is_default_config_dir, launch_config_dirs, parse_config_dirs, split_config_dir_list,
+    CONFIG_DIR_SEPARATOR, autostart_config_dir_argument, launch_config_dirs, launch_suffix, parse_config_dirs,
+    resolve_config_dirs, split_config_dir_list,
 )
 
 
@@ -147,84 +148,21 @@ class TestSplitConfigDirList(unittest.TestCase):
         self.assertEqual(CONFIG_DIR_SEPARATOR, os.pathsep)
 
 
-class TestConfigDirSuffix(unittest.TestCase):
-    """Tests for config_dir_suffix() and is_default_config_dir()."""
+class TestResolveConfigDirs(unittest.TestCase):
 
-    def test_default_when_env_unset(self):
-        with patch.dict('os.environ', {}, clear=False):
-            os.environ.pop('CLAUDE_CONFIG_DIR', None)
-            self.assertTrue(is_default_config_dir())
-            self.assertEqual(config_dir_suffix(), '')
+    def test_flag_wins_over_environment(self):
+        result = resolve_config_dirs(['app', '--config-dir=C:\\flag'], {'CLAUDE_CONFIG_DIR': 'C:\\env'})
+        self.assertEqual(result, ['C:\\flag'])
 
-    def test_default_when_env_points_to_home_claude(self):
-        with TemporaryDirectory() as home_tmp:
-            claude_dir = Path(home_tmp) / '.claude'
-            claude_dir.mkdir()
-            with patch.object(Path, 'home', return_value=Path(home_tmp)), \
-                 patch.dict('os.environ', {'CLAUDE_CONFIG_DIR': str(claude_dir)}):
-                self.assertTrue(is_default_config_dir())
-                self.assertEqual(config_dir_suffix(), '')
+    def test_environment_used_without_flag(self):
+        result = resolve_config_dirs(['app'], {'CLAUDE_CONFIG_DIR': f'C:\\a{CONFIG_DIR_SEPARATOR}C:\\b'})
+        self.assertEqual(result, ['C:\\a', 'C:\\b'])
 
-    def test_custom_dir_produces_suffix(self):
-        with TemporaryDirectory() as config_tmp:
-            with patch.dict('os.environ', {'CLAUDE_CONFIG_DIR': config_tmp}):
-                self.assertFalse(is_default_config_dir())
-                suffix = config_dir_suffix()
-        self.assertTrue(suffix.startswith('_'))
-        self.assertEqual(len(suffix), 13)
-
-    @unittest.skipUnless(sys.platform == 'win32', 'only Windows paths ignore casing')
-    def test_suffix_stable_across_casing_and_trailing_slash(self):
-        with TemporaryDirectory() as config_tmp:
-            with patch.dict('os.environ', {'CLAUDE_CONFIG_DIR': config_tmp}):
-                suffix_plain = config_dir_suffix()
-            with patch.dict('os.environ', {'CLAUDE_CONFIG_DIR': config_tmp.upper() + '\\'}):
-                suffix_variant = config_dir_suffix()
-        self.assertEqual(suffix_plain, suffix_variant)
-
-    def test_suffix_stable_across_trailing_separator(self):
-        """A trailing separator names the same directory and must not split instances."""
-        with TemporaryDirectory() as config_tmp:
-            with patch.dict('os.environ', {'CLAUDE_CONFIG_DIR': config_tmp}):
-                suffix_plain = config_dir_suffix()
-            with patch.dict('os.environ', {'CLAUDE_CONFIG_DIR': config_tmp + os.sep}):
-                suffix_variant = config_dir_suffix()
-        self.assertEqual(suffix_plain, suffix_variant)
-
-    @unittest.skipIf(sys.platform == 'win32', 'POSIX paths are case-sensitive')
-    def test_suffix_differs_by_casing_on_posix(self):
-        """Different casing names a different directory, so it is a different instance."""
-        with TemporaryDirectory() as config_tmp:
-            with patch.dict('os.environ', {'CLAUDE_CONFIG_DIR': config_tmp}):
-                suffix_plain = config_dir_suffix()
-            with patch.dict('os.environ', {'CLAUDE_CONFIG_DIR': config_tmp.upper()}):
-                suffix_variant = config_dir_suffix()
-        self.assertNotEqual(suffix_plain, suffix_variant)
-
-    def test_different_dirs_produce_different_suffixes(self):
-        with TemporaryDirectory() as dir_a, TemporaryDirectory() as dir_b:
-            with patch.dict('os.environ', {'CLAUDE_CONFIG_DIR': dir_a}):
-                suffix_a = config_dir_suffix()
-            with patch.dict('os.environ', {'CLAUDE_CONFIG_DIR': dir_b}):
-                suffix_b = config_dir_suffix()
-        self.assertNotEqual(suffix_a, suffix_b)
-
-    def test_effective_config_dir_resolves_env_value(self):
-        with TemporaryDirectory() as config_tmp:
-            with patch.dict('os.environ', {'CLAUDE_CONFIG_DIR': config_tmp}):
-                self.assertEqual(effective_config_dir(), Path(config_tmp).resolve())
-
-    def test_legacy_suffix_unchanged(self):
-        """Lock and registry names written by earlier versions must still match."""
-        with patch.dict('os.environ', {'CLAUDE_CONFIG_DIR': r'C:\Users\test\.claude-second'}):
-            normalized = os.path.normcase(str(Path(r'C:\Users\test\.claude-second').resolve()))
-            import hashlib
-            expected = '_' + hashlib.sha1(normalized.encode('utf-8')).hexdigest()[:12]
-            self.assertEqual(config_dir_suffix(), expected)
+    def test_nothing_yields_empty(self):
+        self.assertEqual(resolve_config_dirs(['app'], {}), [])
 
 
-class TestLaunchSet(unittest.TestCase):
-    """Tests for launch_config_dirs(), autostart_suffix() and autostart_config_dir_argument()."""
+class TestLaunchIdentity(unittest.TestCase):
 
     def setUp(self):
         self._dir_a = TemporaryDirectory()
@@ -234,69 +172,58 @@ class TestLaunchSet(unittest.TestCase):
         self.dir_a = Path(self._dir_a.name).resolve()
         self.dir_b = Path(self._dir_b.name).resolve()
 
-    def _environment(self, config_dir: str, launch_set: str | None):
-        env = {'CLAUDE_CONFIG_DIR': config_dir}
-        if launch_set is not None:
-            env[LAUNCH_CONFIG_DIRS_ENV] = launch_set
-        patcher = patch.dict('os.environ', env)
+    def _launch(self, *config_dirs: Path):
+        argv = ['app'] + [f'--config-dir={config_dir}' for config_dir in config_dirs]
+        patcher = patch.object(sys, 'argv', argv)
         patcher.start()
-        if launch_set is None:
-            os.environ.pop(LAUNCH_CONFIG_DIRS_ENV, None)
         self.addCleanup(patcher.stop)
+        env = patch.dict('os.environ', {}, clear=False)
+        env.start()
+        os.environ.pop('CLAUDE_CONFIG_DIR', None)
+        self.addCleanup(env.stop)
 
-    def test_single_launch_is_the_effective_dir(self):
-        self._environment(str(self.dir_a), None)
+    def test_no_arguments_means_default_dir(self):
+        with TemporaryDirectory() as home_tmp, patch.object(Path, 'home', return_value=Path(home_tmp)):
+            self._launch()
+            self.assertEqual(launch_config_dirs(), [(Path(home_tmp) / '.claude').resolve()])
+            self.assertEqual(launch_suffix(), '')
+            self.assertIsNone(autostart_config_dir_argument())
+
+    def test_single_custom_dir(self):
+        self._launch(self.dir_a)
         self.assertEqual(launch_config_dirs(), [self.dir_a])
-
-    def test_launch_set_lists_every_dir_resolved(self):
-        self._environment(str(self.dir_a), f'{self.dir_a}{CONFIG_DIR_SEPARATOR}{self.dir_b}{os.sep}')
-        self.assertEqual(launch_config_dirs(), [self.dir_a, self.dir_b])
-
-    def test_single_launch_suffix_matches_instance_suffix(self):
-        """An entry written by an earlier version keeps toggling from the menu."""
-        self._environment(str(self.dir_a), None)
-        self.assertEqual(autostart_suffix(), config_dir_suffix())
-
-    def test_default_only_launch_has_no_suffix(self):
-        with TemporaryDirectory() as home_tmp:
-            claude_dir = Path(home_tmp) / '.claude'
-            claude_dir.mkdir()
-            with patch.object(Path, 'home', return_value=Path(home_tmp)):
-                self._environment(str(claude_dir), None)
-                self.assertEqual(autostart_suffix(), '')
-                self.assertIsNone(autostart_config_dir_argument())
-
-    def test_set_suffix_differs_from_member_suffixes(self):
-        self._environment(str(self.dir_a), f'{self.dir_a}{CONFIG_DIR_SEPARATOR}{self.dir_b}')
-        set_suffix = autostart_suffix()
-        self.assertNotEqual(set_suffix, config_dir_suffix())
-        self.assertTrue(set_suffix.startswith('_'))
-        self.assertEqual(len(set_suffix), 13)
-
-    def test_set_suffix_is_order_independent(self):
-        """Every instance of the set toggles one entry, whichever dir it monitors."""
-        self._environment(str(self.dir_a), f'{self.dir_a}{CONFIG_DIR_SEPARATOR}{self.dir_b}')
-        suffix_from_a = autostart_suffix()
-        self._environment(str(self.dir_b), f'{self.dir_b}{CONFIG_DIR_SEPARATOR}{self.dir_a}')
-        suffix_from_b = autostart_suffix()
-        self.assertEqual(suffix_from_a, suffix_from_b)
-
-    def test_set_including_default_dir_still_gets_suffix(self):
-        """Adding a second account to ~/.claude must not reuse the legacy entry."""
-        with TemporaryDirectory() as home_tmp:
-            claude_dir = Path(home_tmp) / '.claude'
-            claude_dir.mkdir()
-            with patch.object(Path, 'home', return_value=Path(home_tmp)):
-                self._environment(str(claude_dir), f'{claude_dir}{CONFIG_DIR_SEPARATOR}{self.dir_b}')
-                self.assertNotEqual(autostart_suffix(), '')
-                self.assertIsNotNone(autostart_config_dir_argument())
-
-    def test_single_custom_dir_argument(self):
-        self._environment(str(self.dir_a), None)
+        self.assertTrue(launch_suffix().startswith('_'))
+        self.assertEqual(len(launch_suffix()), 13)
         self.assertEqual(autostart_config_dir_argument(), str(self.dir_a))
 
-    def test_set_argument_joins_resolved_dirs_in_launch_order(self):
-        self._environment(str(self.dir_b), f'{self.dir_b}{CONFIG_DIR_SEPARATOR}{self.dir_a}')
+    def test_legacy_single_dir_suffix_unchanged(self):
+        """Entries written by earlier versions (hash of the one directory) must keep matching."""
+        self._launch(self.dir_a)
+        expected = '_' + hashlib.sha1(os.path.normcase(str(self.dir_a)).encode('utf-8')).hexdigest()[:12]
+        self.assertEqual(launch_suffix(), expected)
+
+    def test_set_suffix_is_order_independent(self):
+        self._launch(self.dir_a, self.dir_b)
+        suffix_ab = launch_suffix()
+        self._launch(self.dir_b, self.dir_a)
+        self.assertEqual(launch_suffix(), suffix_ab)
+
+    def test_set_suffix_differs_from_member_suffix(self):
+        self._launch(self.dir_a)
+        single = launch_suffix()
+        self._launch(self.dir_a, self.dir_b)
+        self.assertNotEqual(launch_suffix(), single)
+
+    def test_set_including_default_dir_still_gets_suffix(self):
+        with TemporaryDirectory() as home_tmp, patch.object(Path, 'home', return_value=Path(home_tmp)):
+            claude_dir = Path(home_tmp) / '.claude'
+            claude_dir.mkdir()
+            self._launch(claude_dir, self.dir_b)
+            self.assertNotEqual(launch_suffix(), '')
+            self.assertIsNotNone(autostart_config_dir_argument())
+
+    def test_argument_joins_resolved_dirs_in_launch_order(self):
+        self._launch(self.dir_b, self.dir_a)
         self.assertEqual(autostart_config_dir_argument(), f'{self.dir_b}{CONFIG_DIR_SEPARATOR}{self.dir_a}')
 
 

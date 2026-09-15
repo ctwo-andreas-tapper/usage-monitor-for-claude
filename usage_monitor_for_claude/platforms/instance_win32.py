@@ -16,7 +16,7 @@ import struct
 
 from .. import __version__
 from ..i18n import T
-from ..instance_id import config_dir_suffix
+from ..instance_id import launch_suffix
 from .win32 import ask_yes_no, show_topmost_error
 
 __all__ = ['ensure_single_instance', 'release_instance_lock']
@@ -78,13 +78,12 @@ _pid_mapping_handle: int | None = None
 
 
 def _object_names() -> tuple[str, str]:
-    """Return the per-instance ``(mutex_name, pid_mapping_name)`` pair.
+    """Return this launch's ``(mutex_name, pid_mapping_name)`` pair.
 
-    The names carry a config-dir suffix so one monitor instance per
-    Claude account can run concurrently, each a singleton for its own
-    config directory.
+    The names carry a launch suffix so a second launch of the same account
+    set exits, while a different set runs alongside.
     """
-    suffix = config_dir_suffix()
+    suffix = launch_suffix()
     return _MUTEX_BASE_NAME + suffix, _PID_MAPPING_BASE_NAME + suffix
 
 

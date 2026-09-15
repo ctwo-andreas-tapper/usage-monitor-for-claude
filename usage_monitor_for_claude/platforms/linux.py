@@ -25,7 +25,7 @@ from typing import Any, Callable
 
 from PIL import ImageFont
 
-from ..instance_id import autostart_config_dir_argument, autostart_suffix
+from ..instance_id import autostart_config_dir_argument, launch_suffix
 
 __all__ = [
     'AUTOSTART_DIRECTORY', 'DIAGNOSTIC_PACKAGES', 'ask_yes_no', 'diagnostic_display_rows',
@@ -386,7 +386,7 @@ def _read_color_scheme() -> int | None:
 
 def _autostart_file() -> Path:
     """Return the .desktop path for this launch (one account or a set)."""
-    return AUTOSTART_DIRECTORY / f'{AUTOSTART_BASE_NAME}{autostart_suffix()}.desktop'
+    return AUTOSTART_DIRECTORY / f'{AUTOSTART_BASE_NAME}{launch_suffix()}.desktop'
 
 
 def _autostart_command() -> str:
