@@ -30,7 +30,7 @@ __all__ = [
     'ICON_DARK', 'ICON_FIELDS', 'ICON_LIGHT', 'ICON_STYLE', 'IDLE_INTERVAL', 'IDLE_PAUSE',
     'LANGUAGE', 'MAX_BACKOFF', 'NOTIFY_CLAUDE_UPDATE',
     'ON_RESET_COMMAND', 'ON_STARTUP_COMMAND', 'ON_THRESHOLD_COMMAND', 'QUICK_ACTION_COMMAND',
-    'POLL_ERROR', 'POLL_FAST', 'POLL_FAST_EXTRA', 'POLL_INTERVAL',
+    'POLL_ERROR', 'POLL_FAST', 'POLL_FAST_EXTRA', 'POLL_INTERVAL', 'POLL_STAGGER',
     'POPUP_FIELDS', 'SETTINGS_FILENAME', 'TIME_FORMAT', 'TOOLTIP_FIELDS',
     'get_alert_thresholds',
 ]
@@ -42,6 +42,7 @@ _NUMERIC_BOUNDS: dict[str, int] = {
     'poll_fast': 1,
     'poll_fast_extra': 1,
     'poll_error': 1,
+    'poll_stagger': 0,
     'max_backoff': 1,
     'idle_pause': 0,
     'idle_interval': 1,
@@ -318,6 +319,7 @@ POLL_INTERVAL = _S.get('poll_interval', 180)
 POLL_FAST = _S.get('poll_fast', 120)
 POLL_FAST_EXTRA = _S.get('poll_fast_extra', 2)
 POLL_ERROR = _S.get('poll_error', 30)
+POLL_STAGGER = _S.get('poll_stagger', 5)
 MAX_BACKOFF = _S.get('max_backoff', 900)
 IDLE_PAUSE = _S.get('idle_pause', 300)
 IDLE_INTERVAL = _S.get('idle_interval', 900)

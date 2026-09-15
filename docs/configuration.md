@@ -211,6 +211,7 @@ Run a shell command when a usage event occurs. See [Event Commands](event-comman
 | `poll_fast` | `120` | Seconds when usage is actively increasing |
 | `poll_fast_extra` | `2` | Extra fast polls after usage stops increasing |
 | `poll_error` | `30` | Seconds after a transient error (5xx, network). Rate-limit errors (429) use exponential backoff instead |
+| `poll_stagger` | `5` | Seconds each additional account waits before its first poll, so several accounts do not all call the API at once on startup (0 = disable). Has no effect with a single account |
 | `max_backoff` | `900` | Maximum backoff in seconds for rate-limit errors (15 min) |
 | `idle_pause` | `300` | Seconds of inactivity before polling slows down to `idle_interval` (0 = disable). A locked workstation slows down immediately. An open detail popup keeps the normal cadence unless the lock screen or a screensaver covers it |
 | `idle_interval` | `900` | Seconds between API updates while nobody is at the machine (15 min). Quota resets and account switches are still picked up as they happen |

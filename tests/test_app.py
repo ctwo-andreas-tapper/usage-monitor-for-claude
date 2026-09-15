@@ -14,7 +14,7 @@ from unittest.mock import MagicMock, patch
 
 from usage_monitor_for_claude.account import Account
 from usage_monitor_for_claude.app import (
-    POLL_FAST, RESET_BUFFER, AccountMonitor, UsageMonitorForClaude, _align_to_reset,
+    POLL_FAST, POLL_STAGGER, RESET_BUFFER, AccountMonitor, UsageMonitorForClaude, _align_to_reset,
 )
 from usage_monitor_for_claude.cache import UpdateResult
 from usage_monitor_for_claude.claude_cli import RefreshResult
@@ -3733,6 +3733,52 @@ class TestMultiAccountShell(unittest.TestCase):
             self.assertTrue(self.shell._quick_action_menu_visible())
             self.shell.double_click_installed = True
             self.assertFalse(self.shell._quick_action_menu_visible())
+
+
+class TestPollStagger(unittest.TestCase):
+    """Cold-start stagger and the backoff shared across account monitors."""
+
+    def test_each_monitor_has_its_own_rate_limit(self):
+        """Each account's cache backs off independently (the usage limit is per account)."""
+        shell = _make_shell(accounts=[_ACCOUNT_A, _ACCOUNT_B])
+        try:
+            self.assertIsNot(shell.monitors[0].cache._rate_limit, shell.monitors[1].cache._rate_limit)
+        finally:
+            _cleanup(shell)
+
+    def test_poll_offset_increases_per_account(self):
+        """Each successive account's first poll is offset by one stagger step."""
+        shell = _make_shell(accounts=[_ACCOUNT_A, _ACCOUNT_B])
+        try:
+            self.assertEqual(shell.monitors[0]._poll_offset, 0)
+            self.assertEqual(shell.monitors[1]._poll_offset, POLL_STAGGER)
+        finally:
+            _cleanup(shell)
+
+    def test_wait_poll_offset_returns_immediately_at_zero(self):
+        """The first account (offset 0) does not sleep before its first poll."""
+        app = _make_app()
+        try:
+            app._poll_offset = 0.0
+            with patch('usage_monitor_for_claude.app.time') as mock_time:
+                mock_time.time.return_value = 100.0
+                app._wait_poll_offset()
+            mock_time.sleep.assert_not_called()
+        finally:
+            _cleanup(app)
+
+    def test_wait_poll_offset_yields_to_quit(self):
+        """A pending quit ends the stagger wait without sleeping it out."""
+        app = _make_app()
+        try:
+            app._poll_offset = 3600.0
+            app.running = False
+            with patch('usage_monitor_for_claude.app.time') as mock_time:
+                mock_time.time.return_value = 100.0
+                app._wait_poll_offset()
+            mock_time.sleep.assert_not_called()
+        finally:
+            _cleanup(app)
 
 
 if __name__ == '__main__':

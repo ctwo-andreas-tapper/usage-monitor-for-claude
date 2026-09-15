@@ -29,7 +29,7 @@ from .platforms import (
 from .settings import (
     ALERT_EXTRA_USAGE_SPENT, ALERT_TIME_AWARE, ALERT_TIME_AWARE_BELOW, ICON_FIELDS, IDLE_INTERVAL, IDLE_PAUSE,
     NOTIFY_CLAUDE_UPDATE, ON_RESET_COMMAND, ON_STARTUP_COMMAND, ON_THRESHOLD_COMMAND, POLL_ERROR, POLL_FAST,
-    POLL_FAST_EXTRA, POLL_INTERVAL, QUICK_ACTION_COMMAND, get_alert_thresholds,
+    POLL_FAST_EXTRA, POLL_INTERVAL, POLL_STAGGER, QUICK_ACTION_COMMAND, get_alert_thresholds,
 )
 from .formatting import elapsed_pct, field_period, format_credits, format_tooltip, parse_field_name, popup_label
 from .i18n import T
@@ -101,7 +101,8 @@ def _align_to_reset(interval: int, next_reset: float | None) -> tuple[int, bool]
 class AccountMonitor:
     """Tray icon, cache and poll loop for one Claude account."""
 
-    def __init__(self, account: Account, shell: UsageMonitorForClaude, *, show_label: bool) -> None:
+    def __init__(self, account: Account, shell: UsageMonitorForClaude, *, show_label: bool,
+                 poll_offset: float = 0.0) -> None:
         """Set up the account's tray icon, cache and polling state.
 
         Parameters
@@ -113,11 +114,15 @@ class AccountMonitor:
         show_label : bool
             When True, the tray title and notifications carry a ``[label] ``
             prefix so several accounts can be told apart.
+        poll_offset : float
+            Seconds to delay this account's first poll, spreading the
+            cold-start burst so the accounts do not all fetch at once.
         """
         self.account = account
         self.shell = shell
         self.running = True
         self.cache = UsageCache(account)
+        self._poll_offset = poll_offset
         self.label_prefix = f'[{account.label}] ' if show_label else ''
 
         # Last raw API response (may contain 'error') - for icon and polling decisions
@@ -763,6 +768,21 @@ class AccountMonitor:
 
         return self._is_user_away()
 
+    def _wait_poll_offset(self) -> None:
+        """Delay the first poll by ``_poll_offset`` seconds, stop-aware.
+
+        Staggers the accounts' cold-start fetches so they do not all hit
+        the API at once; the shared rate-limit backoff then holds the rest
+        back if an earlier account is already throttled.  The wait yields
+        immediately to a quit request.
+        """
+        deadline = time.time() + self._poll_offset
+        while self.running:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                return
+            time.sleep(min(1.0, remaining))
+
     def poll_loop(self) -> None:
         """Poll the API in a loop with adaptive intervals.
 
@@ -771,6 +791,7 @@ class AccountMonitor:
         watcher keeps running on an unattended machine.  Coming back - or
         opening the popup - pulls the next poll back to the normal cadence.
         """
+        self._wait_poll_offset()
         self.cache.ensure_profile()
         force_next = False
         while self.running:
@@ -888,7 +909,12 @@ class UsageMonitorForClaude:
         # Only True once every icon reports a working double-click, so the menu
         # entry stays offered where any icon could not wire one up.
         self.double_click_installed = False
-        self.monitors = [AccountMonitor(account, self, show_label=len(accounts) > 1) for account in accounts]
+        # Each account keeps its own 429 backoff (the usage limit is per
+        # account); the stagger just spreads their first polls apart.
+        self.monitors = [
+            AccountMonitor(account, self, show_label=len(accounts) > 1, poll_offset=index * POLL_STAGGER)
+            for index, account in enumerate(accounts)
+        ]
         self.double_click_installed = all(monitor.double_click_installed for monitor in self.monitors)
         if QUICK_ACTION_COMMAND and not self.double_click_installed:
             # Printed rather than shown: not worth a dialog on every start,
