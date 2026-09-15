@@ -26,6 +26,24 @@ from usage_monitor_for_claude.verbose import (
 )
 
 
+def _symlinked_home(tmp: str) -> Path:
+    """Build a home directory reached through a symlink inside ``tmp``.
+
+    Skips the calling test where the platform does not let this process
+    create one (Windows without Developer Mode).
+    """
+    real_home = Path(tmp) / 'realhome'
+    real_home.mkdir()
+    linked_home = Path(tmp) / 'linkhome'
+
+    try:
+        linked_home.symlink_to(real_home, target_is_directory=True)
+    except (OSError, NotImplementedError) as error:
+        raise unittest.SkipTest(f'symlink creation unavailable: {error}') from error
+
+    return linked_home
+
+
 class TestRedactHome(unittest.TestCase):
     """Tests for _redact_home() path sanitization."""
 
@@ -71,6 +89,28 @@ class TestRedactHome(unittest.TestCase):
         """The home directory itself is redacted to ~."""
         home = str(Path.home())
         self.assertEqual(_redact_home(home), '~')
+
+    def test_symlinked_home_redacted_in_both_spellings(self):
+        """Where the home directory is reached through a symlink or a junction,
+        the linked and the resolved spelling name the same directory - a path
+        that arrives already resolved (the credentials file) must be redacted
+        just like one that keeps the linked spelling (``sys.executable``)."""
+        with TemporaryDirectory() as tmp:
+            linked_home = _symlinked_home(tmp)
+
+            with patch.object(Path, 'home', return_value=linked_home):
+                resolved = str(linked_home.resolve() / '.claude' / '.credentials.json')
+                self.assertEqual(_redact_home(resolved), f'~{os.sep}.claude{os.sep}.credentials.json')
+                self.assertEqual(_redact_home(str(linked_home / 'venv' / 'python')), f'~{os.sep}venv{os.sep}python')
+
+    def test_unresolvable_home_still_redacts(self):
+        """Resolving the home directory fails behind a symlink loop and on an
+        unreachable network path - the diagnostics must still print, with the
+        literal spelling redacted as before."""
+        home = str(Path.home())
+        for error in (RuntimeError('Symlink loop'), OSError('network path unavailable')):
+            with self.subTest(error=type(error).__name__), patch.object(Path, 'resolve', side_effect=error):
+                self.assertEqual(_redact_home(f'{home}{os.sep}.claude'), f'~{os.sep}.claude')
 
 
 class TestSection(unittest.TestCase):
@@ -148,6 +188,23 @@ class TestCredentialsStatus(unittest.TestCase):
         self.assertEqual(len(lines), 2)
         self.assertTrue(lines[0].startswith('[present] found'))
         self.assertTrue(lines[1].startswith('[missing] NOT FOUND'))
+
+    def test_symlinked_home_stays_redacted(self):
+        """An account's credentials path is resolved - with the home directory
+        reached through a symlink the line must still show ~, because this is
+        the dump users paste into public issues."""
+        from usage_monitor_for_claude.account import Account
+        with TemporaryDirectory() as tmp:
+            linked_home = _symlinked_home(tmp)
+            (linked_home / '.claude').mkdir()
+            (linked_home / '.claude' / '.credentials.json').write_text('{}', encoding='utf-8')
+
+            with patch.object(Path, 'home', return_value=linked_home):
+                lines = _credentials_status([Account((linked_home / '.claude').resolve(), 'default')])
+
+            self.assertTrue(lines[0].startswith('[default] found'))
+            self.assertIn(f'~{os.sep}.claude{os.sep}.credentials.json', lines[0])
+            self.assertNotIn(str(linked_home.resolve()), lines[0])
 
 
 class TestPrintStartupDiagnostics(unittest.TestCase):

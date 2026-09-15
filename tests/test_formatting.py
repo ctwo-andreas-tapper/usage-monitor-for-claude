@@ -293,6 +293,34 @@ class TestExpandPopupFields(unittest.TestCase):
         result = expand_popup_fields(['*'], usage)
         self.assertEqual(result, [])
 
+    def test_code_named_field_without_reset_window_skipped(self):
+        """A quota the API announces under a code name, before it applies, is not shown."""
+        usage = {
+            'five_hour': {'utilization': 10, 'resets_at': '2026-01-01T00:00:00Z'},
+            'nimbus_quill': {'utilization': 0.0, 'resets_at': None},
+        }
+        for fields in (['*'], ['nimbus_quill']):
+            with self.subTest(popup_fields=fields):
+                self.assertNotIn('nimbus_quill', expand_popup_fields(fields, usage))
+
+    def test_code_named_field_with_reset_window_shown(self):
+        """The same quota appears once the API gives it a reset window."""
+        usage = {'nimbus_quill': {'utilization': 0.0, 'resets_at': '2026-01-01T00:00:00Z'}}
+        result = expand_popup_fields(['*'], usage)
+        self.assertEqual(result, ['nimbus_quill'])
+
+    def test_parsable_field_without_reset_window_shown(self):
+        """A parsable name stays visible without a reset window (inactive model-scoped limit)."""
+        usage = {'seven_day_fable': {'utilization': 0.0, 'resets_at': None}}
+        result = expand_popup_fields(['*'], usage)
+        self.assertEqual(result, ['seven_day_fable'])
+
+    def test_field_just_after_reset_shown(self):
+        """A quota between a reset and its next use (no reset window yet) stays visible on its name."""
+        usage = {'five_hour': {'utilization': 0.0, 'resets_at': None}}
+        result = expand_popup_fields(['*'], usage)
+        self.assertEqual(result, ['five_hour'])
+
     def test_all_fields_null(self):
         """All quota fields null returns empty list."""
         usage = {'five_hour': None, 'seven_day': None, 'seven_day_sonnet': None}
