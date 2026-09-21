@@ -12,6 +12,7 @@ import time
 import traceback
 import webbrowser
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import Any
 
 import pystray  # type: ignore[import-untyped]  # no type stubs available
@@ -166,6 +167,28 @@ class AccountMonitor:
         profile = self.cache.profile
         return ((profile.get('account') or {}).get('email') or '') if isinstance(profile, dict) else ''
 
+    def profile_plan(self) -> str:
+        """Return the account's plan name, or '' when unknown.
+
+        The plan is the organization type from the profile, formatted as
+        the popup shows it. An example is 'claude_max' to 'Claude Max'.
+        """
+        profile = self.cache.profile
+        if not isinstance(profile, dict):
+            return ''
+        return ((profile.get('organization') or {}).get('organization_type') or '').replace('_', ' ').title()
+
+    def account_identity(self) -> SimpleNamespace:
+        """Return the account identity for the snapshot: label, email, plan.
+
+        The email and the plan are null when the profile is not loaded yet.
+        """
+        return SimpleNamespace(
+            label=self.account.label,
+            email=self.profile_email() or None,
+            plan=self.profile_plan() or None,
+        )
+
     def account_env(self) -> dict[str, str]:
         """Environment variables naming this account for event commands."""
         return {'USAGE_MONITOR_ACCOUNT': self.account.label, 'USAGE_MONITOR_ACCOUNT_EMAIL': self.profile_email()}
@@ -253,7 +276,7 @@ class AccountMonitor:
         # Only the default account is published, because the readers show one
         # account. A write failure is logged inside write_snapshot.
         if is_default_config_dir(self.account.config_dir):
-            write_snapshot(result.data, self.account.label)
+            write_snapshot(result.data, self.account_identity())
 
         # Handle CLI update notification from token refresh
         if NOTIFY_CLAUDE_UPDATE and result.token_refresh and result.token_refresh.updated:

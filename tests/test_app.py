@@ -7,6 +7,9 @@ tray rendering, polling interval, and reset notifications.
 """
 from __future__ import annotations
 
+import json
+import os
+import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,6 +21,7 @@ from usage_monitor_for_claude.app import (
 )
 from usage_monitor_for_claude.cache import UpdateResult
 from usage_monitor_for_claude.claude_cli import RefreshResult
+from usage_monitor_for_claude.snapshot import account_snapshot_path
 
 _ACCOUNT_A = Account(Path('/claude/a'), 'a')
 _ACCOUNT_B = Account(Path('/claude/b'), 'b')
@@ -773,6 +777,67 @@ class TestUpdateOrchestration(unittest.TestCase):
 
         self.assertEqual(self.app._prev_utilization.get('five_hour'), 50.0)
         self.assertEqual(self.app._prev_utilization.get('seven_day'), 20.0)
+
+
+# ---------------------------------------------------------------------------
+# Per-account snapshot identity
+# ---------------------------------------------------------------------------
+
+class TestUpdateWritesAccountIdentity(unittest.TestCase):
+    """update() writes the per-account snapshot with the account email and plan."""
+
+    def setUp(self):
+        self.app = _make_app()
+        self._cmd_patch = patch('usage_monitor_for_claude.app.run_event_command')
+        self._cmd_patch.start()
+        self._tmp = tempfile.TemporaryDirectory()
+        self._env_patch = patch.dict(os.environ, {'LOCALAPPDATA': self._tmp.name})
+        self._env_patch.start()
+
+    def tearDown(self):
+        self._env_patch.stop()
+        self._cmd_patch.stop()
+        self._tmp.cleanup()
+        _cleanup(self.app)
+
+    @patch('usage_monitor_for_claude.app.is_default_config_dir', return_value=True)
+    @patch('usage_monitor_for_claude.app.format_tooltip', return_value='tooltip')
+    @patch('usage_monitor_for_claude.app.create_icon_image')
+    def test_snapshot_carries_account_email_and_plan(self, _icon, _tooltip, _default):
+        """After one refresh the per-account file holds the profile email and plan."""
+        data = {'five_hour': {'utilization': 42.0}}
+        self.app.cache = MagicMock()
+        self.app.cache.update.return_value = UpdateResult(data=data)
+        self.app.cache.profile = {
+            'account': {'email': 'a@example.com'},
+            'organization': {'organization_type': 'claude_max'},
+        }
+
+        self.app.update()
+
+        path = account_snapshot_path(self.app.account.label)
+        self.assertTrue(path.exists())
+        snap = json.loads(path.read_text(encoding='utf-8'))
+        self.assertEqual(snap['account']['email'], 'a@example.com')
+        self.assertEqual(snap['account']['plan'], 'Claude Max')
+
+    @patch('usage_monitor_for_claude.app.is_default_config_dir', return_value=True)
+    @patch('usage_monitor_for_claude.app.format_tooltip', return_value='tooltip')
+    @patch('usage_monitor_for_claude.app.create_icon_image')
+    def test_snapshot_email_is_null_when_profile_absent(self, _icon, _tooltip, _default):
+        """When the profile is not loaded yet, the snapshot email is null."""
+        data = {'five_hour': {'utilization': 42.0}}
+        self.app.cache = MagicMock()
+        self.app.cache.update.return_value = UpdateResult(data=data)
+        self.app.cache.profile = None
+
+        self.app.update()
+
+        path = account_snapshot_path(self.app.account.label)
+        self.assertTrue(path.exists())
+        snap = json.loads(path.read_text(encoding='utf-8'))
+        self.assertIsNone(snap['account']['email'])
+        self.assertIsNone(snap['account']['plan'])
 
 
 # ---------------------------------------------------------------------------
