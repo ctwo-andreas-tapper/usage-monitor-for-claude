@@ -800,10 +800,9 @@ class TestUpdateWritesAccountIdentity(unittest.TestCase):
         self._tmp.cleanup()
         _cleanup(self.app)
 
-    @patch('usage_monitor_for_claude.app.is_default_config_dir', return_value=True)
     @patch('usage_monitor_for_claude.app.format_tooltip', return_value='tooltip')
     @patch('usage_monitor_for_claude.app.create_icon_image')
-    def test_snapshot_carries_account_email_and_plan(self, _icon, _tooltip, _default):
+    def test_snapshot_carries_account_email_and_plan(self, _icon, _tooltip):
         """After one refresh the per-account file holds the profile email and plan."""
         data = {'five_hour': {'utilization': 42.0}}
         self.app.cache = MagicMock()
@@ -821,10 +820,9 @@ class TestUpdateWritesAccountIdentity(unittest.TestCase):
         self.assertEqual(snap['account']['email'], 'a@example.com')
         self.assertEqual(snap['account']['plan'], 'Claude Max')
 
-    @patch('usage_monitor_for_claude.app.is_default_config_dir', return_value=True)
     @patch('usage_monitor_for_claude.app.format_tooltip', return_value='tooltip')
     @patch('usage_monitor_for_claude.app.create_icon_image')
-    def test_snapshot_email_is_null_when_profile_absent(self, _icon, _tooltip, _default):
+    def test_snapshot_email_is_null_when_profile_absent(self, _icon, _tooltip):
         """When the profile is not loaded yet, the snapshot email is null."""
         data = {'five_hour': {'utilization': 42.0}}
         self.app.cache = MagicMock()
@@ -838,6 +836,31 @@ class TestUpdateWritesAccountIdentity(unittest.TestCase):
         snap = json.loads(path.read_text(encoding='utf-8'))
         self.assertIsNone(snap['account']['email'])
         self.assertIsNone(snap['account']['plan'])
+
+    @patch('usage_monitor_for_claude.app.format_tooltip', return_value='tooltip')
+    @patch('usage_monitor_for_claude.app.create_icon_image')
+    def test_non_default_account_also_writes_its_file(self, _icon, _tooltip):
+        """Every account writes its own file, not only the default account."""
+        self.app.account = Account(Path('/claude/.claude-2'), '.claude-2')
+        data = {'five_hour': {'utilization': 42.0}}
+        self.app.cache = MagicMock()
+        self.app.cache.update.return_value = UpdateResult(data=data)
+        self.app.cache.profile = {'account': {'email': 'second@example.com'}}
+
+        self.app.update()
+
+        path = account_snapshot_path('.claude-2')
+        self.assertTrue(path.exists())
+        snap = json.loads(path.read_text(encoding='utf-8'))
+        self.assertEqual(snap['account']['label'], '.claude-2')
+
+    def test_profile_plan_handles_non_dict_organization(self):
+        """A non-dict organization yields no plan and does not raise."""
+        self.app.cache = MagicMock()
+        self.app.cache.profile = {'organization': 'not-a-dict'}
+
+        self.assertEqual(self.app.profile_plan(), '')
+        self.assertIsNone(self.app.account_identity().plan)
 
 
 class TestSeedPollStateOnStartup(unittest.TestCase):
@@ -882,12 +905,11 @@ class TestSeedPollStateOnStartup(unittest.TestCase):
 
         fetch_usage.assert_not_called()
 
-    @patch('usage_monitor_for_claude.app.is_default_config_dir', return_value=False)
     @patch('usage_monitor_for_claude.app.format_tooltip', return_value='tooltip')
     @patch('usage_monitor_for_claude.app.create_status_image')
     @patch('usage_monitor_for_claude.cache.read_access_token', return_value='tok')
     @patch('usage_monitor_for_claude.cache.fetch_usage', return_value={'error': 'boom'})
-    def test_old_snapshot_makes_first_tick_poll(self, fetch_usage, _tok, _img, _tt, _default):
+    def test_old_snapshot_makes_first_tick_poll(self, fetch_usage, _tok, _img, _tt):
         """An old snapshot does not seed, so the first update fetches."""
         self._write_snapshot_file(datetime.now(timezone.utc) - timedelta(seconds=POLL_FAST + 60))
 
@@ -932,13 +954,12 @@ class TestSeedPollStateOnStartup(unittest.TestCase):
 
         fetch_usage.assert_called_once()
 
-    @patch('usage_monitor_for_claude.app.is_default_config_dir', return_value=False)
     @patch('usage_monitor_for_claude.app.format_tooltip', return_value='tooltip')
     @patch('usage_monitor_for_claude.app.create_status_image')
     @patch('usage_monitor_for_claude.app.time.sleep')
     @patch('usage_monitor_for_claude.cache.read_access_token', return_value='tok')
     @patch('usage_monitor_for_claude.cache.fetch_usage', return_value={'error': 'boom'})
-    def test_poll_loop_seeds_before_first_fetch(self, fetch_usage, _tok, _sleep, _img, _tt, _default):
+    def test_poll_loop_seeds_before_first_fetch(self, fetch_usage, _tok, _sleep, _img, _tt):
         """poll_loop seeds from a recent snapshot, so its first pass does not fetch.
 
         This guards the wiring: poll_loop must call _seed_poll_state before the

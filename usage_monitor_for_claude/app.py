@@ -19,7 +19,7 @@ from typing import Any
 
 import pystray  # type: ignore[import-untyped]  # no type stubs available
 
-from .account import Account, is_default_config_dir
+from .account import Account
 from .api import api_headers, read_access_token
 from .cache import UsageCache
 from .claude_cli import PROJECT_URL
@@ -180,7 +180,10 @@ class AccountMonitor:
         profile = self.cache.profile
         if not isinstance(profile, dict):
             return ''
-        return ((profile.get('organization') or {}).get('organization_type') or '').replace('_', ' ').title()
+        organization = profile.get('organization')
+        if not isinstance(organization, dict):
+            return ''
+        return (organization.get('organization_type') or '').replace('_', ' ').title()
 
     def account_identity(self) -> SimpleNamespace:
         """Return the account identity for the snapshot: label, email, plan.
@@ -276,11 +279,10 @@ class AccountMonitor:
         self._last_response = result.data
         self.render_tray()
 
-        # Publish the state for local readers such as the smart screen panel.
-        # Only the default account is published, because the readers show one
-        # account. A write failure is logged inside write_snapshot.
-        if is_default_config_dir(self.account.config_dir):
-            write_snapshot(result.data, self.account_identity())
+        # Publish this account's state to its own file for local readers such
+        # as the smart screen panel. A write failure is logged inside
+        # write_snapshot.
+        write_snapshot(result.data, self.account_identity())
 
         # Handle CLI update notification from token refresh
         if NOTIFY_CLAUDE_UPDATE and result.token_refresh and result.token_refresh.updated:
