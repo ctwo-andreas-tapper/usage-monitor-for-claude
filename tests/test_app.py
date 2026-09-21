@@ -932,6 +932,30 @@ class TestSeedPollStateOnStartup(unittest.TestCase):
 
         fetch_usage.assert_called_once()
 
+    @patch('usage_monitor_for_claude.app.is_default_config_dir', return_value=False)
+    @patch('usage_monitor_for_claude.app.format_tooltip', return_value='tooltip')
+    @patch('usage_monitor_for_claude.app.create_status_image')
+    @patch('usage_monitor_for_claude.app.time.sleep')
+    @patch('usage_monitor_for_claude.cache.read_access_token', return_value='tok')
+    @patch('usage_monitor_for_claude.cache.fetch_usage', return_value={'error': 'boom'})
+    def test_poll_loop_seeds_before_first_fetch(self, fetch_usage, _tok, _sleep, _img, _tt, _default):
+        """poll_loop seeds from a recent snapshot, so its first pass does not fetch.
+
+        This guards the wiring: poll_loop must call _seed_poll_state before the
+        first update.  Removing that call makes the first pass fetch and this
+        test fail.
+        """
+        written_at = datetime.now(timezone.utc)
+        self._write_snapshot_file(written_at)
+
+        with patch.object(self.app.cache, 'ensure_profile'), \
+             patch.object(self.app, '_calculate_poll_interval', return_value=0), \
+             patch.object(self.app, '_polling_throttled', side_effect=_stop_after_one_pass(self.app)):
+            self.app.poll_loop()
+
+        fetch_usage.assert_not_called()
+        self.assertEqual(self.app.cache.last_success_time, written_at.timestamp())
+
 
 # ---------------------------------------------------------------------------
 # Reset notifications
