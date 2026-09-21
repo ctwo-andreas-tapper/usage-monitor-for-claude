@@ -1,9 +1,11 @@
 # tests/test_snapshot_v2.py
 import json
+import os
 import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest import mock
 
 from usage_monitor_for_claude import snapshot
 
@@ -45,6 +47,33 @@ class SnapshotV2(unittest.TestCase):
             self.assertTrue((base / 'two.json').exists())
             one = json.loads((base / 'one.json').read_text('utf-8'))
             self.assertEqual(one['account']['label'], 'one')
+
+
+class SnapshotV2Safety(unittest.TestCase):
+    def test_default_path_uses_localappdata(self):
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch.dict(os.environ, {'LOCALAPPDATA': d}):
+                self.assertEqual(
+                    snapshot.account_snapshot_path('x'),
+                    Path(d) / 'usage-monitor-for-claude' / 'snapshots' / 'x.json',
+                )
+
+    def test_write_never_raises(self):
+        with tempfile.TemporaryDirectory() as d:
+            target = Path(d) / 'x.json'
+            with mock.patch('usage_monitor_for_claude.snapshot.os.replace', side_effect=OSError('boom')):
+                result = snapshot.write_snapshot({'five_hour': {'utilization': 1.0}}, Acc('x'), path=target)
+            self.assertIsNone(result)
+
+    def test_write_leaves_no_temporary_file_on_failure(self):
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d)
+            target = base / 'x.json'
+            with mock.patch('usage_monitor_for_claude.snapshot.os.replace', side_effect=OSError('boom')):
+                snapshot.write_snapshot({'five_hour': {'utilization': 1.0}}, Acc('x'), path=target)
+            leftovers = [p.name for p in base.iterdir() if p.name.startswith('.snapshot-')]
+            self.assertEqual(leftovers, [])
+            self.assertFalse(target.exists())
 
 
 if __name__ == '__main__':
