@@ -23,6 +23,19 @@ from usage_monitor_for_claude.cache import UpdateResult
 from usage_monitor_for_claude.claude_cli import RefreshResult
 from usage_monitor_for_claude.snapshot import account_snapshot_path
 
+# Point LOCALAPPDATA at a throwaway folder for the whole test module.
+# Many tests here drive AccountMonitor.update(), which writes a real
+# per-account snapshot file through snapshot.snapshots_dir(). That function
+# reads LOCALAPPDATA first on every platform, and falls back to ~/.cache only
+# when LOCALAPPDATA is not set. Without this redirect the module writes into
+# the developer's real snapshots folder, next to the files the running tray
+# uses. This module is the only one that builds an AccountMonitor, so this is
+# the one place the suite needs. The redirect runs at import time, so it
+# applies under `python -m unittest discover -s tests`, which does not import a
+# tests package __init__. Tests that need their own folder override LOCALAPPDATA
+# with a per-test patch, which restores this value afterwards.
+os.environ['LOCALAPPDATA'] = tempfile.mkdtemp(prefix='umfc-tests-')
+
 _ACCOUNT_A = Account(Path('/claude/a'), 'a')
 _ACCOUNT_B = Account(Path('/claude/b'), 'b')
 
