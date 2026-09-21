@@ -16,7 +16,7 @@ from typing import Any
 
 import pystray  # type: ignore[import-untyped]  # no type stubs available
 
-from .account import Account
+from .account import Account, is_default_config_dir
 from .api import api_headers, read_access_token
 from .cache import UsageCache
 from .claude_cli import PROJECT_URL
@@ -26,6 +26,7 @@ from .platforms import (
     is_screensaver_running, is_workstation_locked, set_autostart, show_error_box, sync_autostart_path,
     taskbar_uses_light_theme, watch_theme_change,
 )
+from .snapshot import write_snapshot
 from .settings import (
     ALERT_EXTRA_USAGE_SPENT, ALERT_TIME_AWARE, ALERT_TIME_AWARE_BELOW, ICON_FIELDS, IDLE_INTERVAL, IDLE_PAUSE,
     NOTIFY_CLAUDE_UPDATE, ON_RESET_COMMAND, ON_STARTUP_COMMAND, ON_THRESHOLD_COMMAND, POLL_ERROR, POLL_FAST,
@@ -247,6 +248,12 @@ class AccountMonitor:
 
         self._last_response = result.data
         self.render_tray()
+
+        # Publish the state for local readers such as the smart screen panel.
+        # Only the default account is published, because the readers show one
+        # account. A write failure is logged inside write_snapshot.
+        if is_default_config_dir(self.account.config_dir):
+            write_snapshot(result.data, self.account.label)
 
         # Handle CLI update notification from token refresh
         if NOTIFY_CLAUDE_UPDATE and result.token_refresh and result.token_refresh.updated:
