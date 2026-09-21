@@ -5,6 +5,11 @@ Snapshot file
 Write the current usage state to a JSON file so that other local
 programs can read it without a second call to the usage endpoint.
 
+The tray writes one file per account. A separate panel program reads
+these files, so the schema is a contract. The file holds the version
+number, the write time, the account identity, an optional error line,
+and the raw usage response.
+
 The write is atomic: the content goes to a temporary file in the same
 directory, then ``os.replace`` moves it into place. A reader therefore
 never sees a half-written file.
@@ -22,73 +27,87 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-__all__ = ['build_snapshot', 'quota_label', 'snapshot_path', 'write_snapshot']
+__all__ = [
+    'account_snapshot_path',
+    'build_snapshot',
+    'safe_account_name',
+    'snapshots_dir',
+    'write_snapshot',
+]
 
 log = logging.getLogger(__name__)
 
-SCHEMA_VERSION = 1
-
-_PERIOD_LABELS = {
-    'five_hour': 'Session',
-    'seven_day': 'Weekly',
-}
+SCHEMA_VERSION = 2
 
 
-def quota_label(field: str) -> str:
-    """Return a short display label for a quota field name.
+def _account_fields(account: Any) -> tuple[str, str | None, str | None]:
+    """Return the label, the email, and the plan for one account.
 
-    ``'five_hour'`` becomes ``'Session'``. A model-scoped field such as
-    ``'seven_day_fable'`` becomes the model name, ``'Fable'``. Any other
-    field becomes its own name in title case.
+    The account is the tray ``Account`` object, or a plain label string.
+    The tray ``Account`` has no email and no plan, so a missing value
+    becomes ``None``.
     """
-    for prefix, label in _PERIOD_LABELS.items():
-        if field == prefix:
-            return label
-        if field.startswith(prefix + '_'):
-            return field[len(prefix) + 1:].replace('_', ' ').title()
-    return field.replace('_', ' ').title()
+    if isinstance(account, str):
+        return account, None, None
+    return (
+        account.label,
+        getattr(account, 'email', None),
+        getattr(account, 'plan', None),
+    )
 
 
-def build_snapshot(data: dict[str, Any], account_label: str | None, written_at: datetime) -> dict[str, Any]:
-    """Return the snapshot dictionary for one usage response.
+def snapshots_dir() -> Path:
+    """Return the folder that holds the per-account snapshot files."""
+    base = os.environ.get('LOCALAPPDATA') or str(Path.home() / '.cache')
+    return Path(base) / 'usage-monitor-for-claude' / 'snapshots'
 
-    Every top-level field whose value is an object with a ``utilization``
-    key becomes one quota entry. No quota name is hardcoded, so a new
-    quota type appears without a code change.
+
+def safe_account_name(label: str) -> str:
+    """Return a file-safe name for one account label.
+
+    Keep letters, digits, dash, underscore, and dot. Replace every
+    other character with an underscore. A leading dot stays.
     """
-    quotas = []
-    for field, value in data.items():
-        if not isinstance(value, dict) or value.get('utilization') is None:
-            continue
-        quotas.append({
-            'field': field,
-            'label': quota_label(field),
-            'utilization': float(value['utilization']),
-            'resets_at': value.get('resets_at'),
-        })
+    return ''.join(
+        c if (c.isascii() and c.isalnum()) or c in '-_.' else '_'
+        for c in label
+    )
 
+
+def account_snapshot_path(label: str) -> Path:
+    """Return the snapshot file path for one account label."""
+    return snapshots_dir() / f'{safe_account_name(label)}.json'
+
+
+def build_snapshot(data: dict[str, Any], account: Any, written_at: datetime) -> dict[str, Any]:
+    """Return the version 2 snapshot dictionary for one usage response.
+
+    The raw usage response goes into ``data`` unchanged. The error line,
+    if any, is lifted from ``data['error']`` into the top-level
+    ``error`` field.
+    """
+    label, email, plan = _account_fields(account)
     return {
         'version': SCHEMA_VERSION,
         'written_at': written_at.isoformat(),
-        'account_label': account_label,
+        'account': {'label': label, 'email': email, 'plan': plan},
         'error': data.get('error'),
-        'quotas': quotas,
+        'data': data,
     }
 
 
-def snapshot_path() -> Path:
-    """Return the default snapshot file path."""
-    base = os.environ.get('LOCALAPPDATA') or str(Path.home() / '.cache')
-    return Path(base) / 'usage-monitor-for-claude' / 'snapshot.json'
+def write_snapshot(data: dict[str, Any], account: Any, path: Path | None = None) -> None:
+    """Write the account snapshot atomically. Log and swallow every failure.
 
-
-def write_snapshot(data: dict[str, Any], account_label: str | None, path: Path | None = None) -> None:
-    """Write the snapshot atomically. Log and swallow every failure."""
-    target = path or snapshot_path()
+    The default path is ``account_snapshot_path(account.label)``. The
+    account is the tray ``Account`` object, or a plain label string.
+    """
+    label, _, _ = _account_fields(account)
+    target = path or account_snapshot_path(label)
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         payload = json.dumps(
-            build_snapshot(data, account_label, datetime.now(timezone.utc)),
+            build_snapshot(data, account, datetime.now(timezone.utc)),
             ensure_ascii=False,
         )
         handle = tempfile.NamedTemporaryFile(
