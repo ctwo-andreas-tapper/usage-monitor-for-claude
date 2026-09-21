@@ -6,6 +6,8 @@ System tray application: one AccountMonitor per Claude account, one shared shell
 """
 from __future__ import annotations
 
+import json
+import logging
 import math
 import threading
 import time
@@ -27,7 +29,7 @@ from .platforms import (
     is_screensaver_running, is_workstation_locked, set_autostart, show_error_box, sync_autostart_path,
     taskbar_uses_light_theme, watch_theme_change,
 )
-from .snapshot import write_snapshot
+from .snapshot import account_snapshot_path, write_snapshot
 from .settings import (
     ALERT_EXTRA_USAGE_SPENT, ALERT_TIME_AWARE, ALERT_TIME_AWARE_BELOW, ICON_FIELDS, IDLE_INTERVAL, IDLE_PAUSE,
     NOTIFY_CLAUDE_UPDATE, ON_RESET_COMMAND, ON_STARTUP_COMMAND, ON_THRESHOLD_COMMAND, POLL_ERROR, POLL_FAST,
@@ -39,6 +41,8 @@ from .popup import UsagePopup
 from .tray_icon import create_icon_image, create_status_image
 
 __all__ = ['AccountMonitor', 'UsageMonitorForClaude', 'crash_log']
+
+log = logging.getLogger(__name__)
 
 # Seconds after a reset at which to place the confirming poll.  A small buffer
 # absorbs minor timing differences (clocks, caches, server-side propagation).
@@ -813,6 +817,39 @@ class AccountMonitor:
                 return
             time.sleep(min(1.0, remaining))
 
+    def _seed_poll_state(self) -> None:
+        """Seed the cache throttle state from this account's saved snapshot.
+
+        Runs once before the first poll.  When the saved file holds good data
+        with a write time still inside the ``POLL_FAST`` cooldown, the cache
+        last-success time is seeded so the first ``update()`` skips while the
+        data is still fresh.  When the file records a rate limit with a
+        positive ``retry_after``, the account backoff is seeded to the saved
+        deadline.  A missing, stale, malformed, or errored file seeds nothing.
+        Every error is logged and swallowed so a bad file never breaks startup.
+        """
+        try:
+            path = account_snapshot_path(self.account.label)
+            if not path.exists():
+                return
+
+            snapshot = json.loads(path.read_text(encoding='utf-8'))
+            written_at = datetime.fromisoformat(snapshot['written_at']).timestamp()
+            data = snapshot.get('data') or {}
+
+            if snapshot.get('error') is None:
+                if written_at + POLL_FAST > time.time():
+                    self.cache.seed_poll_state(last_success_time=written_at)
+                return
+
+            retry_after = data.get('retry_after')
+            if data.get('rate_limited') and retry_after and retry_after > 0:
+                deadline = written_at + retry_after
+                if deadline > time.time():
+                    self.cache.seed_poll_state(backoff_until=deadline)
+        except Exception:
+            log.exception('Cannot seed the poll state from the snapshot')
+
     def poll_loop(self) -> None:
         """Poll the API in a loop with adaptive intervals.
 
@@ -821,6 +858,7 @@ class AccountMonitor:
         watcher keeps running on an unattended machine.  Coming back - or
         opening the popup - pulls the next poll back to the normal cadence.
         """
+        self._seed_poll_state()
         self._wait_poll_offset()
         self.cache.ensure_profile()
         force_next = False

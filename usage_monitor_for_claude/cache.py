@@ -253,6 +253,30 @@ class UsageCache:
         finally:
             self._lock.release()
 
+    def seed_poll_state(self, *, last_success_time: float | None = None, backoff_until: float | None = None) -> None:
+        """Seed the throttle state from a saved snapshot before the first poll.
+
+        The poll loop calls this once at startup so a tray restart does not
+        re-poll every account at once.  A ``last_success_time`` inside the
+        ``POLL_FAST`` cooldown makes the first ``update()`` skip while the
+        saved data is still fresh.  A ``backoff_until`` in the future holds
+        the account off until the saved rate limit ends.
+
+        Parameters
+        ----------
+        last_success_time : float or None
+            Epoch seconds of the saved successful fetch, or None to leave
+            the cooldown untouched.
+        backoff_until : float or None
+            Epoch seconds until which the account must hold off, or None to
+            leave the backoff untouched.
+        """
+        if last_success_time is not None:
+            with self._lock:
+                self._last_success_time = last_success_time
+        if backoff_until is not None:
+            self._rate_limit.extend_to(backoff_until)
+
     # Private helpers
 
     def _update_locked(self, *, force: bool = False) -> UpdateResult:

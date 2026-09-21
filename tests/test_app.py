@@ -11,7 +11,7 @@ import json
 import os
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -838,6 +838,99 @@ class TestUpdateWritesAccountIdentity(unittest.TestCase):
         snap = json.loads(path.read_text(encoding='utf-8'))
         self.assertIsNone(snap['account']['email'])
         self.assertIsNone(snap['account']['plan'])
+
+
+class TestSeedPollStateOnStartup(unittest.TestCase):
+    """The monitor seeds poll state from its own snapshot before the first poll."""
+
+    def setUp(self):
+        self.app = _make_app()
+        self._cmd_patch = patch('usage_monitor_for_claude.app.run_event_command')
+        self._cmd_patch.start()
+        self._tmp = tempfile.TemporaryDirectory()
+        self._env_patch = patch.dict(os.environ, {'LOCALAPPDATA': self._tmp.name})
+        self._env_patch.start()
+
+    def tearDown(self):
+        self._env_patch.stop()
+        self._cmd_patch.stop()
+        self._tmp.cleanup()
+        _cleanup(self.app)
+
+    def _write_snapshot_file(self, written_at, *, error=None, data=None):
+        """Write one per-account snapshot file for this monitor's account."""
+        path = account_snapshot_path(self.app.account.label)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        snap = {
+            'version': 2,
+            'written_at': written_at.isoformat(),
+            'account': {'label': self.app.account.label, 'email': None, 'plan': None},
+            'error': error,
+            'data': data if data is not None else {'five_hour': {'utilization': 10.0}},
+        }
+        path.write_text(json.dumps(snap), encoding='utf-8')
+        return path
+
+    @patch('usage_monitor_for_claude.cache.read_access_token', return_value='tok')
+    @patch('usage_monitor_for_claude.cache.fetch_usage')
+    def test_recent_snapshot_makes_first_tick_skip_fetch(self, fetch_usage, _tok):
+        """A recent good snapshot seeds the cache, so the first update does not fetch."""
+        self._write_snapshot_file(datetime.now(timezone.utc))
+
+        self.app._seed_poll_state()
+        self.app.update()
+
+        fetch_usage.assert_not_called()
+
+    @patch('usage_monitor_for_claude.app.is_default_config_dir', return_value=False)
+    @patch('usage_monitor_for_claude.app.format_tooltip', return_value='tooltip')
+    @patch('usage_monitor_for_claude.app.create_status_image')
+    @patch('usage_monitor_for_claude.cache.read_access_token', return_value='tok')
+    @patch('usage_monitor_for_claude.cache.fetch_usage', return_value={'error': 'boom'})
+    def test_old_snapshot_makes_first_tick_poll(self, fetch_usage, _tok, _img, _tt, _default):
+        """An old snapshot does not seed, so the first update fetches."""
+        self._write_snapshot_file(datetime.now(timezone.utc) - timedelta(seconds=POLL_FAST + 60))
+
+        self.app._seed_poll_state()
+        self.app.update()
+
+        fetch_usage.assert_called_once()
+
+    @patch('usage_monitor_for_claude.cache.read_access_token', return_value='tok')
+    @patch('usage_monitor_for_claude.cache.fetch_usage')
+    def test_rate_limited_snapshot_seeds_backoff(self, fetch_usage, _tok):
+        """A rate-limited snapshot seeds the backoff, so the first update does not fetch."""
+        data = {'error': 'rate limited', 'rate_limited': True, 'retry_after': 300}
+        self._write_snapshot_file(datetime.now(timezone.utc), error='rate limited', data=data)
+
+        self.app._seed_poll_state()
+        self.assertGreater(self.app.cache.rate_limit_remaining, 0)
+
+        self.app.update()
+
+        fetch_usage.assert_not_called()
+
+    @patch('usage_monitor_for_claude.cache.read_access_token', return_value='tok')
+    @patch('usage_monitor_for_claude.cache.fetch_usage', return_value={'error': 'boom'})
+    def test_missing_snapshot_seeds_nothing(self, fetch_usage, _tok):
+        """No snapshot file leaves the cache unseeded, so the first update fetches."""
+        self.app._seed_poll_state()
+        self.app.update()
+
+        fetch_usage.assert_called_once()
+
+    @patch('usage_monitor_for_claude.cache.read_access_token', return_value='tok')
+    @patch('usage_monitor_for_claude.cache.fetch_usage', return_value={'error': 'boom'})
+    def test_malformed_snapshot_does_not_raise(self, fetch_usage, _tok):
+        """A malformed snapshot file seeds nothing and never breaks startup."""
+        path = account_snapshot_path(self.app.account.label)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('not json', encoding='utf-8')
+
+        self.app._seed_poll_state()
+        self.app.update()
+
+        fetch_usage.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
