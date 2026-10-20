@@ -21,6 +21,7 @@ from usage_monitor_for_claude import codex_cli
 from usage_monitor_for_claude.account import PROVIDER_CLAUDE, PROVIDER_CODEX, Account
 from usage_monitor_for_claude.codex_cli import (
     _discover_cli_path, _normalize_rate_limits, codex_home, detect_codex_account, fetch_profile, fetch_usage,
+    fetch_usage_and_profile,
 )
 from usage_monitor_for_claude.i18n import LOCALE_DIR
 
@@ -156,8 +157,49 @@ class TestDetectCodexAccount(unittest.TestCase):
     def test_cli_missing(self):
         self.assertIsNone(self._detect(cli=None)[0])
 
-    def test_auth_file_missing(self):
-        self.assertIsNone(self._detect(auth_file=False)[0])
+    def test_auth_file_present_starts_no_session(self):
+        with patch.object(codex_cli, '_run_session') as session:
+            self._detect()
+        session.assert_not_called()
+
+    def test_auth_file_missing_and_signed_in_reply_is_detected(self):
+        reply = {'result': {'account': {'type': 'chatgpt', 'email': 'dev@example.com'}, 'requiresOpenaiAuth': True}}
+        with patch.object(codex_cli, '_run_session', return_value={2: reply}) as session:
+            account, home = self._detect(auth_file=False)
+        self.assertEqual(account, Account(home, 'codex', PROVIDER_CODEX))
+        session.assert_called_once()
+        self.assertEqual(session.call_args[0][1], [(2, 'account/read', {'refreshToken': False})])
+
+    def test_auth_file_missing_and_null_account_is_not_detected(self):
+        for result in ({'account': None, 'requiresOpenaiAuth': True}, {'account': None, 'requiresOpenaiAuth': False}, {'account': {}}, {}, None, []):
+            with patch.object(codex_cli, '_run_session', return_value={2: {'result': result}}):
+                self.assertIsNone(self._detect(auth_file=False)[0], repr(result))
+
+    def test_auth_file_missing_and_error_reply_is_not_detected(self):
+        with patch.object(codex_cli, '_run_session', return_value={2: {'error': {'message': 'boom'}}}):
+            self.assertIsNone(self._detect(auth_file=False)[0])
+
+    def test_auth_file_missing_and_session_failure_is_not_detected(self):
+        for error in (OSError('exited'), TimeoutError('slow'), codex_cli._CodexUnavailableError('missing')):
+            with patch.object(codex_cli, '_run_session', side_effect=error):
+                self.assertIsNone(self._detect(auth_file=False)[0], repr(error))
+
+    def test_missing_home_is_not_detected_and_starts_no_session(self):
+        with TemporaryDirectory() as tmp:
+            missing = str(Path(tmp) / 'nope')
+            with patch.object(codex_cli, 'MONITOR_CODEX', True), patch.object(codex_cli, 'CODEX_CLI_PATH', _CLI), \
+                 patch.dict(os.environ, {'CODEX_HOME': missing}), patch.object(codex_cli, '_run_session') as session:
+                self.assertIsNone(detect_codex_account([]))
+        session.assert_not_called()
+
+    def test_keyring_check_does_not_read_auth_file(self):
+        with TemporaryDirectory() as tmp:
+            with patch.object(codex_cli, 'MONITOR_CODEX', True), patch.object(codex_cli, 'CODEX_CLI_PATH', _CLI), \
+                 patch.dict(os.environ, {'CODEX_HOME': tmp}), patch.object(codex_cli, '_run_session', return_value={2: {'result': {'account': {'a': 1}}}}), \
+                 patch.object(Path, 'read_text') as read_text, patch('builtins.open') as opened:
+                self.assertIsNotNone(detect_codex_account([]))
+        read_text.assert_not_called()
+        opened.assert_not_called()
 
     def test_label_clash_gets_suffix(self):
         existing = [Account(Path('/a'), 'codex')]
@@ -301,8 +343,12 @@ class TestFetchUsageErrors(unittest.TestCase):
             self.assertNotIn('auth_error', result)
             self.assertNotIn('rate_limited', result)
 
-    def test_no_nameable_window_is_error(self):
-        result, _process, _popen = _run([_reply(3, _limits_result({'usedPercent': 1, 'windowDurationMins': 7}))])
+    def test_window_that_is_not_a_whole_hour_is_named_in_minutes(self):
+        result, _process, _popen = _run([_reply(3, _limits_result({'usedPercent': 1, 'windowDurationMins': 7, 'resetsAt': None}))])
+        self.assertEqual(result, {'seven_minute': {'utilization': 1.0, 'resets_at': None}})
+
+    def test_unusable_window_length_is_error(self):
+        result, _process, _popen = _run([_reply(3, _limits_result({'usedPercent': 1, 'windowDurationMins': 0}))])
         self.assertEqual(result, {'error': EN['codex_no_response']})
 
     def test_missing_result_is_error(self):
@@ -353,9 +399,28 @@ class TestNormalizeRateLimits(unittest.TestCase):
     def test_null_window_skipped(self):
         self.assertEqual(list(_normalize_rate_limits(_limits_result(None, _WEEKLY))), ['seven_day'])
 
-    def test_unnameable_window_skipped(self):
+    def test_window_without_whole_hours_gets_a_minute_name(self):
         usage = _normalize_rate_limits(_limits_result({'usedPercent': 1, 'windowDurationMins': 45}, _WEEKLY))
+        self.assertEqual(list(usage), ['45_minute', 'seven_day'])
+
+    def test_non_positive_window_skipped(self):
+        usage = _normalize_rate_limits(_limits_result({'usedPercent': 1, 'windowDurationMins': 0}, _WEEKLY))
         self.assertEqual(list(usage), ['seven_day'])
+
+    def test_documented_example_with_fifteen_and_sixty_minute_windows(self):
+        result = {
+            'rateLimits': {'limitId': 'codex', 'primary': {'usedPercent': 25, 'windowDurationMins': 15, 'resetsAt': 1730947200}},
+            'rateLimitsByLimitId': {
+                'codex': {'limitId': 'codex', 'limitName': None, 'primary': {'usedPercent': 25, 'windowDurationMins': 15, 'resetsAt': 1730947200}},
+                'codex_other': {
+                    'limitId': 'codex_other', 'limitName': None, 'primary': {'usedPercent': 42, 'windowDurationMins': 60, 'resetsAt': 1730950800},
+                },
+            },
+        }
+        usage = _normalize_rate_limits(result)
+        self.assertEqual(list(usage), ['15_minute', 'one_hour_codex_other'])
+        self.assertEqual(usage['15_minute']['utilization'], 25.0)
+        self.assertEqual(usage['one_hour_codex_other']['utilization'], 42.0)
 
     def test_non_dict_junk_ignored(self):
         for junk in (None, [], 'text', 5, {'rateLimitsByLimitId': 'x'}, {'rateLimitsByLimitId': {'codex': 'x'}}, {'rateLimits': ['a']}):
@@ -389,6 +454,52 @@ class TestNormalizeRateLimits(unittest.TestCase):
     def test_resets_at_is_utc_iso(self):
         usage = _normalize_rate_limits(_limits_result({'usedPercent': 0, 'windowDurationMins': 300, 'resetsAt': 0}))
         self.assertEqual(usage['five_hour']['resets_at'], '1970-01-01T00:00:00+00:00')
+
+
+class TestFetchUsageAndProfile(unittest.TestCase):
+
+    _ACCOUNT_REPLY = {'account': {'type': 'chatgpt', 'email': 'dev@example.com', 'planType': 'plus'}}
+
+    def test_one_session_carries_both_requests(self):
+        (usage, profile), process, popen = _run([_reply(2, self._ACCOUNT_REPLY), _reply(3, _limits_result(_WEEKLY))], fetch_usage_and_profile)
+        popen.assert_called_once()
+        sent = [json.loads(line) for line in process.written]
+        self.assertEqual(sent[2], {'id': 2, 'method': 'account/read', 'params': {'refreshToken': False}})
+        self.assertEqual(sent[3], {'id': 3, 'method': 'account/rateLimits/read'})
+        self.assertEqual(usage, {'seven_day': {'utilization': 12.0, 'resets_at': '2026-10-27T06:48:50+00:00'}})
+        self.assertEqual(profile, {'account': {'email': 'dev@example.com', 'uuid': 'acc-1'}, 'organization': {'organization_type': 'plus'}})
+
+    def test_signed_out_account_gives_no_profile_but_keeps_usage(self):
+        (usage, profile), _process, _popen = _run([_reply(2, {'account': None}), _reply(3, _limits_result(_WEEKLY))], fetch_usage_and_profile)
+        self.assertIn('seven_day', usage)
+        self.assertIsNone(profile)
+
+    def test_account_error_gives_no_profile_but_keeps_usage(self):
+        (usage, profile), _process, _popen = _run([_reply(2, error={'message': 'no'}), _reply(3, _limits_result(_WEEKLY))], fetch_usage_and_profile)
+        self.assertIn('seven_day', usage)
+        self.assertIsNone(profile)
+
+    def test_usage_error_gives_error_and_no_profile(self):
+        error = {'message': 'authentication required'}
+        (usage, profile), _process, _popen = _run([_reply(2, self._ACCOUNT_REPLY), _reply(3, error=error)], fetch_usage_and_profile)
+        self.assertEqual(usage, {'error': EN['codex_auth_required']})
+        self.assertIsNone(profile)
+
+    def test_session_failure_gives_error_and_no_profile(self):
+        (usage, profile), _process, _popen = _run([], fetch_usage_and_profile)
+        self.assertEqual(usage, {'error': EN['codex_no_response']})
+        self.assertIsNone(profile)
+
+    def test_cli_missing_gives_error_and_no_profile(self):
+        with patch.object(codex_cli, 'CODEX_CLI_PATH', None):
+            usage, profile = fetch_usage_and_profile(_ACCOUNT)
+        self.assertEqual(usage, {'error': EN['codex_not_found']})
+        self.assertIsNone(profile)
+
+    def test_never_sets_claude_only_flags(self):
+        (usage, _profile), _process, _popen = _run([], fetch_usage_and_profile)
+        self.assertNotIn('auth_error', usage)
+        self.assertNotIn('rate_limited', usage)
 
 
 class TestFetchProfile(unittest.TestCase):

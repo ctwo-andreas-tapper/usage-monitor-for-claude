@@ -26,7 +26,8 @@ _NUMBER_WORDS = {
     'one': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5, 'six': 6,
     'seven': 7, 'eight': 8, 'nine': 9, 'ten': 10, 'eleven': 11, 'twelve': 12,
 }
-_UNIT_SUFFIXES = {'hour': 'h', 'day': 'd'}
+_UNIT_SUFFIXES = {'minute': 'm', 'hour': 'h', 'day': 'd'}
+_UNIT_ORDER = {'minute': 0, 'hour': 1, 'day': 2}
 _TITLE_CASE_EXCEPTIONS = {'oauth': 'OAuth', 'api': 'API', 'ai': 'AI'}
 _CURRENCY_SYMBOLS = {
     'USD': '$', 'EUR': '€', 'GBP': '£', 'JPY': '¥', 'CNY': '¥',
@@ -46,17 +47,18 @@ def parse_field_name(field: str) -> tuple[int, str, str | None] | None:
     -------
     tuple or None
         ``(number, unit, variant)`` where *number* is the parsed digit,
-        *unit* is the raw unit word (e.g. ``'hour'``, ``'day'``), and
-        *variant* is the remaining suffix or ``None``.
-        Returns ``None`` if the number word or unit is not recognized.
+        *unit* is the raw unit word (``'minute'``, ``'hour'`` or ``'day'``),
+        and *variant* is the remaining suffix or ``None``.  The number is
+        a number word (``'five'``) or decimal digits (``'15'``).
+        Returns ``None`` if the number or unit is not recognized.
     """
     parts = field.split('_', 2)
     if len(parts) < 2:
         return None
 
-    number = _NUMBER_WORDS.get(parts[0])
+    number = int(parts[0]) if parts[0].isascii() and parts[0].isdigit() else _NUMBER_WORDS.get(parts[0])
     unit = parts[1]
-    if number is None or unit not in _UNIT_SUFFIXES:
+    if number is None or number < 1 or unit not in _UNIT_SUFFIXES:
         return None
 
     variant = parts[2] if len(parts) > 2 else None
@@ -74,9 +76,10 @@ def field_name_for_window(minutes: int) -> str | None:
     Returns
     -------
     str or None
-        ``'seven_day'`` for 10080, ``'five_hour'`` for 300, and so on.  Whole
-        days win over hours.  None when the length is not a whole number of
-        hours or the count has no number word (1 to 12).
+        ``'seven_day'`` for 10080, ``'five_hour'`` for 300, ``'15_minute'``
+        for 15.  Whole days win over hours, whole hours over minutes.  A
+        count without a number word (1 to 12) is written in digits.  None
+        when *minutes* is not a positive integer.
     """
     if isinstance(minutes, bool) or not isinstance(minutes, int) or minutes <= 0:
         return None
@@ -86,13 +89,13 @@ def field_name_for_window(minutes: int) -> str | None:
     elif minutes % 60 == 0:
         count, unit = minutes // 60, 'hour'
     else:
-        return None
+        count, unit = minutes, 'minute'
 
     for word, number in _NUMBER_WORDS.items():
         if number == count:
             return f'{word}_{unit}'
 
-    return None
+    return f'{count}_{unit}'
 
 
 def _title_case_variant(text: str) -> str:
@@ -146,12 +149,14 @@ def popup_label(field: str) -> str:
     number, unit, variant = parsed
     if variant:
         suffix = _title_case_variant(variant)
+    elif unit == 'minute':
+        suffix = f'{number}min'
     elif unit == 'hour':
         suffix = f'{number}hr'
     else:
         suffix = f'{number} {unit}'
 
-    template_key = 'session_label' if unit == 'hour' else 'weekly_label'
+    template_key = 'weekly_label' if unit == 'day' else 'session_label'
     return T[template_key].format(suffix=suffix)
 
 
@@ -168,6 +173,8 @@ def field_period(field: str) -> int | None:
         return None
 
     number, unit, _ = parsed
+    if unit == 'minute':
+        return number * 60
     if unit == 'hour':
         return number * 3600
     if unit == 'day':
@@ -200,10 +207,10 @@ def _field_sort_key(field: str) -> tuple[int, int, int, str]:
     """Sort key for default field ordering: shorter periods first, base before variants."""
     parsed = parse_field_name(field)
     if parsed is None:
-        return (2, 0, 0, field)
+        return (3, 0, 0, field)
 
     number, unit, variant = parsed
-    unit_order = 0 if unit == 'hour' else 1
+    unit_order = _UNIT_ORDER[unit]
     variant_order = 0 if variant is None else 1
     return (unit_order, number, variant_order, variant or '')
 

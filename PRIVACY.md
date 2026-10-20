@@ -32,7 +32,8 @@ The application reads your existing Claude OAuth token from the local Claude CLI
 
 The application never reads Codex credentials. The Codex CLI keeps its login in its own home folder
 (`~/.codex`, or the folder in `CODEX_HOME`), and the application only checks that the file `auth.json`
-exists there.
+exists there. If the file is missing, the Codex CLI may keep its login in the operating system keyring.
+The application then asks the Codex CLI whether it is signed in and never reads the keyring itself.
 
 ## Local Storage
 

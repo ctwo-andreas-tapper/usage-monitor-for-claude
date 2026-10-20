@@ -30,7 +30,7 @@ from .i18n import T
 from .platforms import no_window_kwargs
 from .settings import MONITOR_CODEX
 
-__all__ = ['CODEX_CLI_PATH', 'codex_home', 'detect_codex_account', 'fetch_profile', 'fetch_usage']
+__all__ = ['CODEX_CLI_PATH', 'codex_home', 'detect_codex_account', 'fetch_profile', 'fetch_usage', 'fetch_usage_and_profile']
 
 log = logging.getLogger(__name__)
 
@@ -103,14 +103,18 @@ def detect_codex_account(existing: list[Account]) -> Account | None:
     -------
     Account or None
         An account for the Codex home when ``monitor_codex`` is on, the
-        CLI is installed and the home holds ``auth.json`` (the CLI is
-        signed in).  The file is only checked for existence, never read.
+        CLI is installed and the CLI is signed in.  An ``auth.json`` in the
+        home counts as signed in without any process being started; the
+        file is only checked for existence, never read.  Without the file
+        the login may sit in the OS keyring, so one app-server session asks
+        ``account/read``.  A missing home folder is never asked: the
+        app-server exits with an error for it.
     """
     if not MONITOR_CODEX or CODEX_CLI_PATH is None:
         return None
 
     home = codex_home()
-    if not (home / 'auth.json').is_file():
+    if not (home / 'auth.json').is_file() and not (home.is_dir() and _is_signed_in(Account(home, CODEX_ACCOUNT_LABEL, PROVIDER_CODEX))):
         return None
 
     taken = {account.label for account in existing}
@@ -121,6 +125,20 @@ def detect_codex_account(existing: list[Account]) -> Account | None:
         label = f'{CODEX_ACCOUNT_LABEL} ({number})'
 
     return Account(home, label, PROVIDER_CODEX)
+
+
+def _is_signed_in(account: Account) -> bool:
+    """Return whether the CLI reports a signed-in account; any failure counts as not signed in."""
+    try:
+        replies = _run_session(account, [(_ID_ACCOUNT, 'account/read', {'refreshToken': False})])
+    except (_CodexUnavailableError, OSError, TimeoutError) as error:
+        log.info('codex sign-in check failed: %s', error)
+        return False
+
+    result = replies[_ID_ACCOUNT].get('result')
+    codex_account = result.get('account') if isinstance(result, dict) else None
+
+    return isinstance(codex_account, dict) and bool(codex_account)
 
 
 def fetch_usage(account: Account) -> dict[str, Any]:
@@ -150,6 +168,30 @@ def fetch_usage(account: Account) -> dict[str, Any]:
     return _rate_limits_to_usage(replies[_ID_RATE_LIMITS])
 
 
+def fetch_usage_and_profile(account: Account) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """Fetch *account*'s limits and identity in one app-server session.
+
+    Returns
+    -------
+    tuple[dict, dict or None]
+        The usage as ``fetch_usage()`` returns it, and the profile as
+        ``fetch_profile()`` returns it.  The profile is None when the
+        identity could not be read, also when the usage was returned.
+    """
+    try:
+        replies = _run_session(account, [
+            (_ID_ACCOUNT, 'account/read', {'refreshToken': False}),
+            (_ID_RATE_LIMITS, 'account/rateLimits/read', None),
+        ])
+    except _CodexUnavailableError as error:
+        return {'error': str(error)}, None
+    except (OSError, TimeoutError) as error:
+        log.info('codex app-server session failed: %s', error)
+        return {'error': T['codex_no_response']}, None
+
+    return _rate_limits_to_usage(replies[_ID_RATE_LIMITS]), _replies_to_profile(replies)
+
+
 def fetch_profile(account: Account) -> dict[str, Any] | None:
     """Fetch *account*'s identity in the shape the Claude profile has.
 
@@ -169,6 +211,11 @@ def fetch_profile(account: Account) -> dict[str, Any] | None:
         log.info('codex profile lookup failed: %s', error)
         return None
 
+    return _replies_to_profile(replies)
+
+
+def _replies_to_profile(replies: dict[int, dict[str, Any]]) -> dict[str, Any] | None:
+    """Build the profile from the replies to ``account/read`` and ``account/rateLimits/read``, or None."""
     account_result = replies[_ID_ACCOUNT].get('result')
     limits_result = replies[_ID_RATE_LIMITS].get('result')
     if not isinstance(account_result, dict) or not isinstance(limits_result, dict):
@@ -405,7 +452,6 @@ def _window_entry(window: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
 
     base_name = field_name_for_window(minutes)
     if base_name is None:
-        log.debug('codex window of %s minutes has no field name, skipped', minutes)
         return None
 
     used = window.get('usedPercent')
