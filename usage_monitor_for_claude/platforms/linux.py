@@ -18,6 +18,8 @@ import locale
 import os
 import platform
 import shlex
+import signal
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -32,7 +34,8 @@ __all__ = [
     'autostart_supported', 'install_tray_click_handler', 'prepare_gui_environment', 'set_dpi_awareness',
     'diagnostic_post_init_rows', 'diagnostic_runtime_rows', 'diagnostic_system_rows',
     'double_click_seconds', 'get_idle_seconds', 'is_autostart_enabled',
-    'is_screensaver_running', 'is_workstation_locked', 'load_font', 'no_window_kwargs', 'register_notification_identity',
+    'is_screensaver_running', 'is_workstation_locked', 'kill_process_tree', 'load_font', 'no_window_kwargs', 'process_group_kwargs',
+    'register_notification_identity',
     'set_autostart', 'setup_console', 'show_error_box', 'show_topmost_error', 'show_warning_box',
     'sync_autostart_path', 'system_time_format', 'taskbar_uses_light_theme', 'watch_theme_change',
 ]
@@ -80,6 +83,28 @@ def no_window_kwargs() -> dict[str, Any]:
     POSIX has no console-window concept, so no flags are needed.
     """
     return {}
+
+
+def process_group_kwargs() -> dict[str, Any]:
+    """Return ``subprocess`` keyword arguments that let ``kill_process_tree`` reach every child.
+
+    A new session makes the child the leader of its own process group, so
+    the whole group can be signalled at once.
+    """
+    return {'start_new_session': True}
+
+
+def kill_process_tree(process: subprocess.Popen[Any]) -> None:
+    """Kill *process* and every process it started.
+
+    The process must have been started with ``process_group_kwargs()``, so
+    its process group id equals its pid.  A group that is already gone is
+    not an error.
+    """
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        process.kill()
 
 
 def show_error_box(message: str, title: str) -> None:

@@ -294,13 +294,34 @@ class TestSession(unittest.TestCase):
         self.assertEqual(result, {'error': EN['codex_no_response']})
         process.stdin.close.assert_called_once()
 
-    def test_process_that_does_not_exit_is_terminated_then_killed(self):
+    def test_process_that_does_not_exit_has_its_tree_killed(self):
+        """A server still running after stdin closes is killed with every child, not just the shim."""
+        process = _FakeProcess([_reply(3, _limits_result(_WEEKLY))])
+        process.wait = MagicMock(side_effect=[subprocess.TimeoutExpired('codex', 1), 0])
+        with patch.object(codex_cli, 'CODEX_CLI_PATH', _CLI), patch.object(codex_cli.subprocess, 'Popen', return_value=process), \
+                patch.object(codex_cli, 'kill_process_tree') as kill_tree:
+            fetch_usage(_ACCOUNT)
+        kill_tree.assert_called_once_with(process)
+        self.assertFalse(process.terminated)
+
+    def test_tree_kill_that_does_not_end_the_process_falls_back_to_kill(self):
         process = _FakeProcess([_reply(3, _limits_result(_WEEKLY))])
         process.wait = MagicMock(side_effect=[subprocess.TimeoutExpired('codex', 1), subprocess.TimeoutExpired('codex', 1), 0])
-        with patch.object(codex_cli, 'CODEX_CLI_PATH', _CLI), patch.object(codex_cli.subprocess, 'Popen', return_value=process):
+        with patch.object(codex_cli, 'CODEX_CLI_PATH', _CLI), patch.object(codex_cli.subprocess, 'Popen', return_value=process), \
+                patch.object(codex_cli, 'kill_process_tree'):
             fetch_usage(_ACCOUNT)
-        self.assertTrue(process.terminated)
         self.assertTrue(process.killed)
+
+    def test_process_that_exits_is_not_killed(self):
+        with patch.object(codex_cli, 'kill_process_tree') as kill_tree:
+            _result, process, _popen = _run([_reply(3, _limits_result(_WEEKLY))])
+        kill_tree.assert_not_called()
+        self.assertFalse(process.killed)
+
+    def test_server_starts_in_its_own_process_group(self):
+        with patch.object(codex_cli, 'process_group_kwargs', return_value={'start_new_session': True}):
+            _result, _process, popen = _run([_reply(3, _limits_result(_WEEKLY))])
+        self.assertIs(popen.call_args.kwargs.get('start_new_session'), True)
 
     def test_broken_pipe_is_error(self):
         process = _FakeProcess([])
@@ -519,6 +540,19 @@ class TestFetchProfile(unittest.TestCase):
         limits['rateLimits']['planType'] = 'pro'
         profile, _process, _popen = _run([_reply(2, account_reply), _reply(3, limits)], fetch_profile)
         self.assertEqual(profile['organization']['organization_type'], 'pro')
+
+    def test_missing_account_id_falls_back_to_email(self):
+        """The schema allows a null accountId; the email then identifies the account so a switch is still detected."""
+        limits = _limits_result(_WEEKLY)
+        limits['accountId'] = None
+        profile, _process, _popen = _run([_reply(2, self._ACCOUNT_REPLY), _reply(3, limits)], fetch_profile)
+        self.assertEqual(profile['account']['uuid'], 'dev@example.com')
+
+    def test_no_account_id_and_no_email_has_no_identity(self):
+        limits = _limits_result(_WEEKLY)
+        del limits['accountId']
+        profile, _process, _popen = _run([_reply(2, {'account': {'type': 'apiKey'}}), _reply(3, limits)], fetch_profile)
+        self.assertIsNone(profile['account']['uuid'])
 
     def test_replies_in_any_order(self):
         profile, _process, _popen = _run([_reply(3, _limits_result(_WEEKLY)), _reply(2, self._ACCOUNT_REPLY)], fetch_profile)

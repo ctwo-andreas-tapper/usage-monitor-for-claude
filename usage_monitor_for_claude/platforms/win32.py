@@ -29,7 +29,8 @@ __all__ = [
     'autostart_supported', 'install_tray_click_handler', 'prepare_gui_environment', 'set_dpi_awareness',
     'diagnostic_display_rows', 'diagnostic_post_init_rows', 'diagnostic_runtime_rows',
     'diagnostic_system_rows', 'double_click_seconds', 'get_idle_seconds',
-    'is_autostart_enabled', 'is_screensaver_running', 'is_workstation_locked', 'load_font', 'no_window_kwargs',
+    'is_autostart_enabled', 'is_screensaver_running', 'is_workstation_locked', 'kill_process_tree', 'load_font', 'no_window_kwargs',
+    'process_group_kwargs',
     'register_notification_identity', 'set_autostart', 'show_error_box', 'show_warning_box',
     'setup_console', 'show_topmost_error', 'sync_autostart_path', 'system_time_format',
     'taskbar_uses_light_theme', 'watch_theme_change',
@@ -100,6 +101,27 @@ class _LASTINPUTINFO(ctypes.Structure):
 def no_window_kwargs() -> dict[str, Any]:
     """Return ``subprocess`` keyword arguments that suppress a console window."""
     return {'creationflags': subprocess.CREATE_NO_WINDOW}
+
+
+def process_group_kwargs() -> dict[str, Any]:
+    """Return ``subprocess`` keyword arguments that let ``kill_process_tree`` reach every child.
+
+    Windows needs none: ``taskkill /T`` follows the parent process ids.
+    """
+    return {}
+
+
+def kill_process_tree(process: subprocess.Popen[Any]) -> None:
+    """Kill *process* and every process it started.
+
+    ``Popen.terminate()`` ends only the direct child.  For an npm shim such as
+    ``codex.cmd`` that is the ``cmd.exe`` wrapper, while Node and the native
+    binary it started keep running.
+    """
+    try:
+        subprocess.run(['taskkill', '/PID', str(process.pid), '/T', '/F'], capture_output=True, timeout=10, **no_window_kwargs())
+    except (OSError, subprocess.TimeoutExpired):
+        process.kill()
 
 
 def show_error_box(message: str, title: str) -> None:

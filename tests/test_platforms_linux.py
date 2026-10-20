@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import time
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -25,6 +26,47 @@ class TestNoWindowKwargs(unittest.TestCase):
     def test_is_empty(self):
         """POSIX has no console-window concept, so no subprocess flags are added."""
         self.assertEqual(linux.no_window_kwargs(), {})
+
+
+class TestKillProcessTree(unittest.TestCase):
+
+    def test_process_group_kwargs_starts_a_new_session(self):
+        """A new session makes the child its own process group leader."""
+        self.assertEqual(linux.process_group_kwargs(), {'start_new_session': True})
+
+    def test_kills_the_whole_process_group(self):
+        process = MagicMock(pid=4242)
+        with patch.object(linux.os, 'killpg') as killpg:
+            linux.kill_process_tree(process)
+        killpg.assert_called_once_with(4242, linux.signal.SIGKILL)
+        process.kill.assert_not_called()
+
+    def test_group_already_gone_falls_back_to_kill(self):
+        for error in (ProcessLookupError(), PermissionError()):
+            process = MagicMock(pid=4242)
+            with patch.object(linux.os, 'killpg', side_effect=error):
+                linux.kill_process_tree(process)
+            process.kill.assert_called_once()
+
+    def test_really_kills_a_child_and_its_grandchild(self):
+        """A shell that starts a sleeping grandchild is gone, grandchild included."""
+        process = subprocess.Popen(['sh', '-c', 'sleep 60 & wait'], **linux.process_group_kwargs())
+        try:
+            linux.kill_process_tree(process)
+            self.assertIsNotNone(process.wait(timeout=5))
+            # The orphaned grandchild is reaped by init shortly after the kill.
+            deadline = time.monotonic() + 2
+            group_alive = True
+            while group_alive and time.monotonic() < deadline:
+                try:
+                    linux.os.killpg(process.pid, 0)
+                    time.sleep(0.05)
+                except ProcessLookupError:
+                    group_alive = False
+            self.assertFalse(group_alive)
+        finally:
+            if process.poll() is None:
+                process.kill()
 
 
 class TestSystemTimeFormat(unittest.TestCase):
