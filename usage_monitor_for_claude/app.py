@@ -19,7 +19,7 @@ from typing import Any
 
 import pystray  # type: ignore[import-untyped]  # no type stubs available
 
-from .account import Account
+from .account import PROVIDER_CLAUDE, Account
 from .api import api_headers, read_access_token
 from .cache import UsageCache
 from .claude_cli import PROJECT_URL
@@ -352,7 +352,7 @@ class AccountMonitor:
                 continue
 
             _, unit, _ = parsed
-            reset_threshold = 95 if unit == 'hour' else 98
+            reset_threshold = 98 if unit == 'day' else 95
             any_blocking = any(other_pct >= 99 for other_key, other_pct in quota_fields.items() if other_key != key)
 
             if prev > reset_threshold and pct < prev and not any_blocking:
@@ -945,7 +945,7 @@ class AccountMonitor:
                 icon.stop()
                 return
             icon.visible = True
-            if not api_headers(self.account):
+            if self.account.provider == PROVIDER_CLAUDE and not api_headers(self.account):
                 icon.notify(f"{T['warn_no_token']}\n{T['warn_login']}", self.label_prefix + T['popup_title'])
             self.poll_loop()
         except Exception:

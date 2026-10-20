@@ -296,8 +296,8 @@ function updateStatus(status) {
  * Build and display the status text from current state.
  *
  * < 60s:  "Updated Xs ago"
- * >= 60s: "Updated Xm ago · Next update in Ym"
- * + refreshing or error appended with · separator
+ * >= 60s: "Updated Xm ago - Next update in Ym"
+ * + refreshing or error appended with - separator
  */
 function tickStatusText() {
     if (!statusState.lastSuccessTime) return;
@@ -413,8 +413,13 @@ function createAccountBlock(account) {
     return block;
 }
 
+// The label keeps two accounts with the same email apart (a Claude and a Codex login).
+function accountHeading(account) {
+    return account.email ? `${account.label} - ${account.email}` : account.label;
+}
+
 function updateAccountBlock(block, account) {
-    block.querySelector('.account-name').textContent = account.email || account.label;
+    block.querySelector('.account-name').textContent = accountHeading(account);
     block.querySelector('.account-plan').textContent = account.plan || '';
 
     const error = block.querySelector('.account-error');

@@ -14,12 +14,72 @@ from unittest.mock import MagicMock, patch
 
 from usage_monitor_for_claude.formatting import (
     PERIOD_5H, PERIOD_7D,
-    divider_positions, elapsed_pct, expand_popup_fields, field_period, format_credits,
+    divider_positions, elapsed_pct, expand_popup_fields, field_name_for_window, field_period, format_credits,
     format_tooltip, parse_field_name, popup_label, time_until, tooltip_label,
 )
 from usage_monitor_for_claude.i18n import LOCALE_DIR
 
 EN = json.loads((LOCALE_DIR / 'en.json').read_text(encoding='utf-8'))
+
+
+# ---------------------------------------------------------------------------
+# field_name_for_window
+# ---------------------------------------------------------------------------
+
+class TestFieldNameForWindow(unittest.TestCase):
+    """Tests for field_name_for_window()."""
+
+    def test_five_hours(self):
+        self.assertEqual(field_name_for_window(300), 'five_hour')
+
+    def test_seven_days(self):
+        self.assertEqual(field_name_for_window(10080), 'seven_day')
+
+    def test_whole_days_win_over_hours(self):
+        self.assertEqual(field_name_for_window(1440), 'one_day')
+        self.assertEqual(field_name_for_window(2880), 'two_day')
+
+    def test_one_hour(self):
+        self.assertEqual(field_name_for_window(60), 'one_hour')
+
+    def test_twelve_hours(self):
+        self.assertEqual(field_name_for_window(720), 'twelve_hour')
+
+    def test_thirteen_hours_is_written_in_digits(self):
+        self.assertEqual(field_name_for_window(780), '13_hour')
+
+    def test_thirteen_days_is_written_in_digits(self):
+        self.assertEqual(field_name_for_window(13 * 1440), '13_day')
+
+    def test_thirty_days(self):
+        self.assertEqual(field_name_for_window(43200), '30_day')
+
+    def test_fifteen_minutes(self):
+        self.assertEqual(field_name_for_window(15), '15_minute')
+
+    def test_not_a_whole_hour_is_minutes(self):
+        self.assertEqual(field_name_for_window(90), '90_minute')
+
+    def test_one_minute_has_number_word(self):
+        self.assertEqual(field_name_for_window(1), 'one_minute')
+
+    def test_zero_and_negative(self):
+        self.assertIsNone(field_name_for_window(0))
+        self.assertIsNone(field_name_for_window(-300))
+        self.assertIsNone(field_name_for_window(-5))
+
+    def test_wrong_type(self):
+        self.assertIsNone(field_name_for_window(15.0))  # type: ignore[arg-type]  # deliberate wrong type
+        self.assertIsNone(field_name_for_window(True))
+        self.assertIsNone(field_name_for_window('300'))  # type: ignore[arg-type]  # deliberate wrong type
+
+    def test_round_trips_through_parse_field_name(self):
+        for minutes in (1, 15, 60, 90, 180, 300, 720, 780, 1440, 4320, 10080, 12 * 1440, 43200):
+            parsed = parse_field_name(field_name_for_window(minutes))  # type: ignore[arg-type]  # name is not None here
+            self.assertIsNotNone(parsed)
+            number, unit, variant = parsed  # type: ignore[misc]  # checked above
+            self.assertEqual(number * {'minute': 1, 'hour': 60, 'day': 1440}[unit], minutes)
+            self.assertIsNone(variant)
 
 
 # ---------------------------------------------------------------------------
@@ -73,6 +133,34 @@ class TestParseFieldName(unittest.TestCase):
     def test_empty_string(self):
         self.assertIsNone(parse_field_name(''))
 
+    def test_digit_number_with_minute(self):
+        self.assertEqual(parse_field_name('15_minute'), (15, 'minute', None))
+
+    def test_digit_number_with_day_and_variant(self):
+        self.assertEqual(parse_field_name('30_day_codex_other'), (30, 'day', 'codex_other'))
+
+    def test_word_number_with_minute(self):
+        self.assertEqual(parse_field_name('one_minute'), (1, 'minute', None))
+
+    def test_zero_digit_number_is_unparseable(self):
+        self.assertIsNone(parse_field_name('0_hour'))
+
+    def test_digits_with_unknown_unit_are_unparseable(self):
+        self.assertIsNone(parse_field_name('15_year'))
+        self.assertIsNone(parse_field_name('15_usage'))
+
+    def test_non_digit_number_is_unparseable(self):
+        self.assertIsNone(parse_field_name('1.5_hour'))
+        self.assertIsNone(parse_field_name('-5_hour'))
+        self.assertIsNone(parse_field_name('\u0663_hour'))
+
+    def test_existing_claude_names_keep_their_meaning(self):
+        self.assertEqual(parse_field_name('five_hour'), (5, 'hour', None))
+        self.assertEqual(parse_field_name('seven_day_sonnet'), (7, 'day', 'sonnet'))
+        self.assertIsNone(parse_field_name('tangelo'))
+        self.assertIsNone(parse_field_name('iguana_necktie'))
+        self.assertIsNone(parse_field_name('extra_usage'))
+
 
 # ---------------------------------------------------------------------------
 # tooltip_label
@@ -125,6 +213,12 @@ class TestTooltipLabel(unittest.TestCase):
         """api is title-cased as API."""
         self.assertEqual(tooltip_label('seven_day_api'), '7d API')
 
+    def test_minute_window(self):
+        self.assertEqual(tooltip_label('15_minute'), '15m')
+
+    def test_digit_day_window_with_variant(self):
+        self.assertEqual(tooltip_label('30_day_codex_other'), '30d Codex Other')
+
 
 # ---------------------------------------------------------------------------
 # popup_label
@@ -155,6 +249,18 @@ class TestPopupLabel(unittest.TestCase):
     def test_three_day_foo(self):
         self.assertEqual(popup_label('three_day_foo'), 'Weekly (Foo)')
 
+    def test_minute_window_uses_session_template(self):
+        self.assertEqual(popup_label('15_minute'), 'Session (15min)')
+
+    def test_minute_window_with_variant(self):
+        self.assertEqual(popup_label('15_minute_codex_other'), 'Session (Codex Other)')
+
+    def test_digit_day_window_uses_weekly_template(self):
+        self.assertEqual(popup_label('30_day'), 'Weekly (30 day)')
+
+    def test_digit_hour_window_uses_session_template(self):
+        self.assertEqual(popup_label('13_hour'), 'Session (13hr)')
+
     def test_unknown_fallback(self):
         self.assertEqual(popup_label('extra_usage'), 'Extra Usage')
 
@@ -180,6 +286,12 @@ class TestFieldPeriod(unittest.TestCase):
 
     def test_three_day(self):
         self.assertEqual(field_period('three_day'), 3 * 24 * 3600)
+
+    def test_fifteen_minutes(self):
+        self.assertEqual(field_period('15_minute'), 15 * 60)
+
+    def test_thirty_days(self):
+        self.assertEqual(field_period('30_day'), 30 * 24 * 3600)
 
     def test_unknown_returns_none(self):
         self.assertIsNone(field_period('extra_usage'))
@@ -241,6 +353,16 @@ class TestExpandPopupFields(unittest.TestCase):
         result = expand_popup_fields([], usage)
         self.assertEqual(result, [])
 
+    def test_default_order_minute_before_hour_before_day(self):
+        usage = self._usage(seven_day=20, five_hour=10, **{'15_minute': 5, '30_day': 1})
+        result = expand_popup_fields(['*'], usage)
+        self.assertEqual(result, ['15_minute', 'five_hour', 'seven_day', '30_day'])
+
+    def test_default_order_unparseable_last(self):
+        usage = self._usage(tangelo=1, seven_day=20, **{'15_minute': 5})
+        result = expand_popup_fields(['*'], usage)
+        self.assertEqual(result, ['15_minute', 'seven_day', 'tangelo'])
+
     def test_default_order_hour_before_day(self):
         """Default order puts hour fields before day fields."""
         usage = self._usage(seven_day=20, five_hour=10)
@@ -280,6 +402,17 @@ class TestExpandPopupFields(unittest.TestCase):
         }
         result = expand_popup_fields(['*'], usage)
         self.assertEqual(result, ['five_hour'])
+
+    def test_default_order_is_by_window_length(self):
+        """Shorter windows come first whatever their unit; a base field precedes its variants."""
+        names = ['one_day', '90_minute', 'seven_day_sonnet', 'one_hour', '15_minute', '25_hour', 'seven_day', 'five_hour']
+        usage = {name: {'utilization': 1, 'resets_at': ''} for name in names}
+        result = expand_popup_fields(['*'], usage)
+        self.assertEqual(result, ['15_minute', 'one_hour', '90_minute', 'five_hour', 'one_day', '25_hour', 'seven_day', 'seven_day_sonnet'])
+
+    def test_unparseable_fields_sort_last(self):
+        usage = {name: {'utilization': 1, 'resets_at': ''} for name in ('tangelo', 'seven_day', '15_minute')}
+        self.assertEqual(expand_popup_fields(['*'], usage), ['15_minute', 'seven_day', 'tangelo'])
 
     def test_field_with_utilization_none_skipped(self):
         """Fields where utilization is None are skipped even when explicitly listed."""

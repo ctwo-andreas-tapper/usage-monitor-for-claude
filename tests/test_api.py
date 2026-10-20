@@ -13,7 +13,7 @@ from tempfile import TemporaryDirectory
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from usage_monitor_for_claude.account import Account
+from usage_monitor_for_claude.account import PROVIDER_CODEX, Account
 from usage_monitor_for_claude.api import (
     API_URL_USAGE, _extract_server_message, _merge_scoped_limits, _model_slug, _normalize_prepaid_credits, _parse_retry_after,
     fetch_prepaid_credits, fetch_usage, read_access_token,
@@ -36,6 +36,12 @@ def _account(tmp: str) -> Account:
 
 class TestReadAccessToken(unittest.TestCase):
     """Tests for read_access_token()."""
+
+    def test_codex_account_has_no_token_even_with_credentials_file(self):
+        """A non-Claude account returns None without reading any credentials file."""
+        with TemporaryDirectory() as tmp:
+            (Path(tmp) / '.credentials.json').write_text(json.dumps({'claudeAiOauth': {'accessToken': 'sk-test-123'}}))
+            self.assertIsNone(read_access_token(Account(Path(tmp), 'codex', PROVIDER_CODEX)))
 
     def test_file_missing(self):
         """Missing credentials file returns None."""

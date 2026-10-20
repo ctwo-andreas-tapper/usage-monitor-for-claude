@@ -50,6 +50,7 @@ if _verbose:
 import webview  # type: ignore[import-untyped]  # no type stubs available
 
 from usage_monitor_for_claude.app import UsageMonitorForClaude, crash_log
+from usage_monitor_for_claude.codex_cli import detect_codex_account
 from usage_monitor_for_claude.launch import spawn_app_instance
 from usage_monitor_for_claude.platforms import register_notification_identity
 from usage_monitor_for_claude.platforms.instance import ensure_single_instance, release_instance_lock
@@ -60,6 +61,12 @@ if _verbose:
         format='%(asctime)s %(levelname)-5s %(name)s: %(message)s',
         datefmt='%H:%M:%S',
     )
+
+# The Codex account joins the monitored set only here: it never enters --config-dir,
+# launch_suffix() or the autostart entry, which name Claude directories alone.
+_codex_account = detect_codex_account(_accounts)
+if _codex_account is not None:
+    _accounts.append(_codex_account)
 
 _result: dict = {}
 
