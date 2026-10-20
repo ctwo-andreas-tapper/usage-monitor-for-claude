@@ -359,7 +359,9 @@ class TestExpandPopupFields(unittest.TestCase):
         self.assertEqual(result, ['15_minute', 'five_hour', 'seven_day', '30_day'])
 
     def test_default_order_unparseable_last(self):
+        """An active field whose name does not parse sorts after every window."""
         usage = self._usage(tangelo=1, seven_day=20, **{'15_minute': 5})
+        usage['tangelo']['resets_at'] = '2026-01-01T00:00:00Z'
         result = expand_popup_fields(['*'], usage)
         self.assertEqual(result, ['15_minute', 'seven_day', 'tangelo'])
 
@@ -409,10 +411,6 @@ class TestExpandPopupFields(unittest.TestCase):
         usage = {name: {'utilization': 1, 'resets_at': ''} for name in names}
         result = expand_popup_fields(['*'], usage)
         self.assertEqual(result, ['15_minute', 'one_hour', '90_minute', 'five_hour', 'one_day', '25_hour', 'seven_day', 'seven_day_sonnet'])
-
-    def test_unparseable_fields_sort_last(self):
-        usage = {name: {'utilization': 1, 'resets_at': ''} for name in ('tangelo', 'seven_day', '15_minute')}
-        self.assertEqual(expand_popup_fields(['*'], usage), ['15_minute', 'seven_day', 'tangelo'])
 
     def test_field_with_utilization_none_skipped(self):
         """Fields where utilization is None are skipped even when explicitly listed."""
