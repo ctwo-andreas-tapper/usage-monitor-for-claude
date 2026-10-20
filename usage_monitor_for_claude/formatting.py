@@ -27,7 +27,6 @@ _NUMBER_WORDS = {
     'seven': 7, 'eight': 8, 'nine': 9, 'ten': 10, 'eleven': 11, 'twelve': 12,
 }
 _UNIT_SUFFIXES = {'minute': 'm', 'hour': 'h', 'day': 'd'}
-_UNIT_ORDER = {'minute': 0, 'hour': 1, 'day': 2}
 _TITLE_CASE_EXCEPTIONS = {'oauth': 'OAuth', 'api': 'API', 'ai': 'AI'}
 _CURRENCY_SYMBOLS = {
     'USD': '$', 'EUR': '€', 'GBP': '£', 'JPY': '¥', 'CNY': '¥',
@@ -183,15 +182,15 @@ def field_period(field: str) -> int | None:
 
 
 def _field_sort_key(field: str) -> tuple[int, int, int, str]:
-    """Sort key for default field ordering: shorter periods first, base before variants."""
+    """Sort key for default field ordering: shorter windows first, base before variants, unparseable last."""
     parsed = parse_field_name(field)
-    if parsed is None:
-        return (3, 0, 0, field)
+    period = field_period(field)
+    if parsed is None or period is None:
+        return (1, 0, 0, field)
 
-    number, unit, variant = parsed
-    unit_order = _UNIT_ORDER[unit]
+    variant = parsed[2]
     variant_order = 0 if variant is None else 1
-    return (unit_order, number, variant_order, variant or '')
+    return (0, period, variant_order, variant or '')
 
 
 def expand_popup_fields(popup_fields: list[str], usage_data: dict[str, Any]) -> list[str]:

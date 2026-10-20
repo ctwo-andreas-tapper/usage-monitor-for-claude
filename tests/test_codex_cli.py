@@ -139,64 +139,63 @@ class TestCodexHome(unittest.TestCase):
 
 class TestDetectCodexAccount(unittest.TestCase):
 
-    def _detect(self, existing=None, *, setting=True, cli=_CLI, auth_file=True):
+    _CHATGPT = {2: {'result': {'account': {'type': 'chatgpt', 'email': 'dev@example.com'}, 'requiresOpenaiAuth': True}}}
+
+    def _detect(self, existing=None, *, setting=True, cli=_CLI, replies=None):
+        """Run detection against a temporary Codex home and a stubbed app-server session."""
         with TemporaryDirectory() as tmp:
-            if auth_file:
-                (Path(tmp) / 'auth.json').write_text('{}')
-            with patch.object(codex_cli, 'MONITOR_CODEX', setting), patch.object(codex_cli, 'CODEX_CLI_PATH', cli), \
-                 patch.dict(os.environ, {'CODEX_HOME': tmp}):
-                return detect_codex_account(existing or []), Path(tmp).resolve()
+            with patch.object(codex_cli, 'MONITOR_CODEX', setting), patch.object(codex_cli, 'CODEX_CLI_PATH', cli),                  patch.dict(os.environ, {'CODEX_HOME': tmp}),                  patch.object(codex_cli, '_run_session', return_value=self._CHATGPT if replies is None else replies) as session:
+                return detect_codex_account(existing or []), Path(tmp).resolve(), session
 
-    def test_detected_when_signed_in(self):
-        account, home = self._detect()
-        self.assertEqual(account, Account(home, 'codex', PROVIDER_CODEX))
-
-    def test_setting_off(self):
-        self.assertIsNone(self._detect(setting=False)[0])
-
-    def test_cli_missing(self):
-        self.assertIsNone(self._detect(cli=None)[0])
-
-    def test_auth_file_present_starts_no_session(self):
-        with patch.object(codex_cli, '_run_session') as session:
-            self._detect()
-        session.assert_not_called()
-
-    def test_auth_file_missing_and_signed_in_reply_is_detected(self):
-        reply = {'result': {'account': {'type': 'chatgpt', 'email': 'dev@example.com'}, 'requiresOpenaiAuth': True}}
-        with patch.object(codex_cli, '_run_session', return_value={2: reply}) as session:
-            account, home = self._detect(auth_file=False)
+    def test_chatgpt_login_is_detected(self):
+        account, home, session = self._detect()
         self.assertEqual(account, Account(home, 'codex', PROVIDER_CODEX))
         session.assert_called_once()
         self.assertEqual(session.call_args[0][1], [(2, 'account/read', {'refreshToken': False})])
 
-    def test_auth_file_missing_and_null_account_is_not_detected(self):
+    def test_setting_off_starts_no_session(self):
+        account, _home, session = self._detect(setting=False)
+        self.assertIsNone(account)
+        session.assert_not_called()
+
+    def test_cli_missing_starts_no_session(self):
+        account, _home, session = self._detect(cli=None)
+        self.assertIsNone(account)
+        session.assert_not_called()
+
+    def test_api_key_login_is_not_detected(self):
+        """Rate limits exist only for a ChatGPT login; an API-key login would only ever show an error."""
+        replies = {2: {'result': {'account': {'type': 'apiKey'}, 'requiresOpenaiAuth': True}}}
+        self.assertIsNone(self._detect(replies=replies)[0])
+
+    def test_unknown_or_missing_account_type_is_not_detected(self):
+        for codex_account in ({'type': 'other', 'email': 'dev@example.com'}, {'email': 'dev@example.com'}, {'type': None}):
+            self.assertIsNone(self._detect(replies={2: {'result': {'account': codex_account}}})[0], repr(codex_account))
+
+    def test_signed_out_is_not_detected(self):
         for result in ({'account': None, 'requiresOpenaiAuth': True}, {'account': None, 'requiresOpenaiAuth': False}, {'account': {}}, {}, None, []):
-            with patch.object(codex_cli, '_run_session', return_value={2: {'result': result}}):
-                self.assertIsNone(self._detect(auth_file=False)[0], repr(result))
+            self.assertIsNone(self._detect(replies={2: {'result': result}})[0], repr(result))
 
-    def test_auth_file_missing_and_error_reply_is_not_detected(self):
-        with patch.object(codex_cli, '_run_session', return_value={2: {'error': {'message': 'boom'}}}):
-            self.assertIsNone(self._detect(auth_file=False)[0])
+    def test_error_reply_is_not_detected(self):
+        self.assertIsNone(self._detect(replies={2: {'error': {'message': 'boom'}}})[0])
 
-    def test_auth_file_missing_and_session_failure_is_not_detected(self):
+    def test_session_failure_is_not_detected(self):
         for error in (OSError('exited'), TimeoutError('slow'), codex_cli._CodexUnavailableError('missing')):
-            with patch.object(codex_cli, '_run_session', side_effect=error):
-                self.assertIsNone(self._detect(auth_file=False)[0], repr(error))
+            with TemporaryDirectory() as tmp:
+                with patch.object(codex_cli, 'MONITOR_CODEX', True), patch.object(codex_cli, 'CODEX_CLI_PATH', _CLI),                      patch.dict(os.environ, {'CODEX_HOME': tmp}), patch.object(codex_cli, '_run_session', side_effect=error):
+                    self.assertIsNone(detect_codex_account([]), repr(error))
 
     def test_missing_home_is_not_detected_and_starts_no_session(self):
         with TemporaryDirectory() as tmp:
             missing = str(Path(tmp) / 'nope')
-            with patch.object(codex_cli, 'MONITOR_CODEX', True), patch.object(codex_cli, 'CODEX_CLI_PATH', _CLI), \
-                 patch.dict(os.environ, {'CODEX_HOME': missing}), patch.object(codex_cli, '_run_session') as session:
+            with patch.object(codex_cli, 'MONITOR_CODEX', True), patch.object(codex_cli, 'CODEX_CLI_PATH', _CLI),                  patch.dict(os.environ, {'CODEX_HOME': missing}), patch.object(codex_cli, '_run_session') as session:
                 self.assertIsNone(detect_codex_account([]))
         session.assert_not_called()
 
-    def test_keyring_check_does_not_read_auth_file(self):
+    def test_does_not_read_auth_file(self):
         with TemporaryDirectory() as tmp:
-            with patch.object(codex_cli, 'MONITOR_CODEX', True), patch.object(codex_cli, 'CODEX_CLI_PATH', _CLI), \
-                 patch.dict(os.environ, {'CODEX_HOME': tmp}), patch.object(codex_cli, '_run_session', return_value={2: {'result': {'account': {'a': 1}}}}), \
-                 patch.object(Path, 'read_text') as read_text, patch('builtins.open') as opened:
+            (Path(tmp) / 'auth.json').write_text('{}')
+            with patch.object(codex_cli, 'MONITOR_CODEX', True), patch.object(codex_cli, 'CODEX_CLI_PATH', _CLI),                  patch.dict(os.environ, {'CODEX_HOME': tmp}), patch.object(codex_cli, '_run_session', return_value=self._CHATGPT),                  patch.object(Path, 'read_text') as read_text, patch('builtins.open') as opened:
                 self.assertIsNotNone(detect_codex_account([]))
         read_text.assert_not_called()
         opened.assert_not_called()
@@ -208,16 +207,6 @@ class TestDetectCodexAccount(unittest.TestCase):
     def test_repeated_label_clash_counts_on(self):
         existing = [Account(Path('/a'), 'codex'), Account(Path('/b'), 'codex (2)')]
         self.assertEqual(self._detect(existing)[0].label, 'codex (3)')
-
-    def test_does_not_read_auth_file(self):
-        with TemporaryDirectory() as tmp:
-            (Path(tmp) / 'auth.json').write_text('{}')
-            with patch.object(codex_cli, 'MONITOR_CODEX', True), patch.object(codex_cli, 'CODEX_CLI_PATH', _CLI), \
-                 patch.dict(os.environ, {'CODEX_HOME': tmp}), patch.object(Path, 'read_text') as read_text, \
-                 patch('builtins.open') as opened:
-                detect_codex_account([])
-        read_text.assert_not_called()
-        opened.assert_not_called()
 
 
 class TestSession(unittest.TestCase):

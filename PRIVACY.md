@@ -32,9 +32,9 @@ The application reads your existing Claude OAuth token from the local Claude CLI
 - Never logged, stored elsewhere, copied, or transmitted to any third party
 
 The application never reads Codex credentials. The Codex CLI keeps its login in its own home folder
-(`~/.codex`, or the folder in `CODEX_HOME`), and the application only checks that the file `auth.json`
-exists there. If the file is missing, the Codex CLI may keep its login in the operating system keyring.
-The application then asks the Codex CLI whether it is signed in and never reads the keyring itself.
+(`~/.codex`, or the folder in `CODEX_HOME`) or in the operating system keyring. When the application
+starts, it asks the Codex CLI whether you are signed in with a ChatGPT account. It never reads the
+login file or the keyring itself.
 
 ## Local Storage
 
