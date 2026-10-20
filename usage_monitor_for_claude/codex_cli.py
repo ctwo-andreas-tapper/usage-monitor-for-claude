@@ -27,7 +27,7 @@ from . import __version__
 from .account import PROVIDER_CODEX, Account
 from .formatting import field_name_for_window
 from .i18n import T
-from .platforms import no_window_kwargs
+from .platforms import kill_process_tree, no_window_kwargs, process_group_kwargs
 from .settings import MONITOR_CODEX
 
 __all__ = ['CODEX_CLI_PATH', 'codex_home', 'detect_codex_account', 'fetch_profile', 'fetch_usage', 'fetch_usage_and_profile']
@@ -228,8 +228,11 @@ def _replies_to_profile(replies: dict[int, dict[str, Any]]) -> dict[str, Any] | 
     limits = limits_result.get('rateLimits')
     plan_type = codex_account.get('planType') or (limits.get('planType') if isinstance(limits, dict) else None)
 
+    # The schema allows a null accountId; the email still tells two logins apart.
+    identity = limits_result.get('accountId') or codex_account.get('email')
+
     return {
-        'account': {'email': codex_account.get('email'), 'uuid': limits_result.get('accountId')},
+        'account': {'email': codex_account.get('email'), 'uuid': identity},
         'organization': {'organization_type': plan_type},
     }
 
@@ -284,7 +287,7 @@ def _run_session(account: Account, requests: list[tuple[int, str, dict[str, Any]
     process = subprocess.Popen(
         [str(CODEX_CLI_PATH), 'app-server'],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-        text=True, encoding='utf-8', errors='replace', env=environment, **no_window_kwargs(),
+        text=True, encoding='utf-8', errors='replace', env=environment, **no_window_kwargs(), **process_group_kwargs(),
     )
     try:
         assert process.stdin is not None and process.stdout is not None
@@ -351,7 +354,7 @@ def _collect_replies(lines: queue.Queue[str | None], expected_ids: set[int]) -> 
 
 
 def _stop_process(process: subprocess.Popen[str]) -> None:
-    """Close the server's input and make sure it ends, killing it when it does not exit."""
+    """Close the server's input and make sure it ends, killing its process tree when it does not exit."""
     try:
         if process.stdin is not None:
             process.stdin.close()
@@ -364,7 +367,8 @@ def _stop_process(process: subprocess.Popen[str]) -> None:
     except subprocess.TimeoutExpired:
         pass
 
-    process.terminate()
+    # An npm shim starts Node and the native binary; terminate() would end only the shim.
+    kill_process_tree(process)
     try:
         process.wait(timeout=_EXIT_TIMEOUT)
     except subprocess.TimeoutExpired:

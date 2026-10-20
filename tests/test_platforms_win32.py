@@ -27,6 +27,34 @@ class TestNoWindowKwargs(unittest.TestCase):
         self.assertEqual(win32.no_window_kwargs(), {'creationflags': subprocess.CREATE_NO_WINDOW})
 
 
+class TestKillProcessTree(unittest.TestCase):
+
+    def test_process_group_kwargs_is_empty(self):
+        """taskkill /T follows parent process ids, so no creation flag is needed."""
+        self.assertEqual(win32.process_group_kwargs(), {})
+
+    def test_runs_taskkill_for_the_whole_tree(self):
+        process = MagicMock(pid=4242)
+        with patch.object(win32.subprocess, 'run') as run:
+            win32.kill_process_tree(process)
+        command = run.call_args.args[0]
+        self.assertEqual(command, ['taskkill', '/PID', '4242', '/T', '/F'])
+        self.assertEqual(run.call_args.kwargs.get('creationflags'), win32.subprocess.CREATE_NO_WINDOW)
+        process.kill.assert_not_called()
+
+    def test_falls_back_to_kill_when_taskkill_fails_to_start(self):
+        process = MagicMock(pid=4242)
+        with patch.object(win32.subprocess, 'run', side_effect=OSError('missing')):
+            win32.kill_process_tree(process)
+        process.kill.assert_called_once()
+
+    def test_falls_back_to_kill_when_taskkill_hangs(self):
+        process = MagicMock(pid=4242)
+        with patch.object(win32.subprocess, 'run', side_effect=win32.subprocess.TimeoutExpired('taskkill', 10)):
+            win32.kill_process_tree(process)
+        process.kill.assert_called_once()
+
+
 class TestSystemTimeFormat(unittest.TestCase):
     """Tests for locale-based 12h/24h detection."""
 
