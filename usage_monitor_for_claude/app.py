@@ -352,7 +352,7 @@ class AccountMonitor:
                 continue
 
             _, unit, _ = parsed
-            reset_threshold = 95 if unit == 'hour' else 98
+            reset_threshold = 98 if unit == 'day' else 95
             any_blocking = any(other_pct >= 99 for other_key, other_pct in quota_fields.items() if other_key != key)
 
             if prev > reset_threshold and pct < prev and not any_blocking:

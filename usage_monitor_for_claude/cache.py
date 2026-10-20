@@ -322,7 +322,7 @@ class UsageCache:
         """Fetch usage data and process the response."""
         token_before = read_access_token(self.account)
         log.info('fetch_usage started')
-        data = self._fetch_usage()
+        data, polled_profile = self._fetch_usage_and_profile()
 
         if 'error' in data:
             self._record_error(data)
@@ -356,15 +356,20 @@ class UsageCache:
         pct_5h = (data.get('five_hour') or {}).get('utilization')
         pct_7d = (data.get('seven_day') or {}).get('utilization')
         log.info('fetch_usage -> OK (5h: %s%%, 7d: %s%%)', pct_5h if pct_5h is not None else '?', pct_7d if pct_7d is not None else '?')
-        self._record_success(data, token_before, self._fetch_prepaid_balance(data))
+        self._record_success(data, token_before, self._fetch_prepaid_balance(data), polled_profile)
         return UpdateResult(data=data, token=token_before)
 
-    def _fetch_usage(self) -> dict[str, Any]:
-        """Fetch usage from the provider of this cache's account."""
-        if self.account.provider == PROVIDER_CODEX:
-            return codex_cli.fetch_usage(self.account)
+    def _fetch_usage_and_profile(self) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        """Fetch usage from the provider of this cache's account.
 
-        return fetch_usage(self.account)
+        Codex answers the profile in the same session as the usage, so the
+        profile follows a Codex account switch without a second process.
+        Claude has no such profile and returns None.
+        """
+        if self.account.provider == PROVIDER_CODEX:
+            return codex_cli.fetch_usage_and_profile(self.account)
+
+        return fetch_usage(self.account), None
 
     def _fetch_profile(self) -> dict[str, Any] | None:
         """Fetch the profile from the provider of this cache's account."""
@@ -438,7 +443,9 @@ class UsageCache:
                 error += f'\n{server_msg}'
             self._last_error = error
 
-    def _record_success(self, data: dict[str, Any], token: str | None, prepaid: dict[str, Any] | None) -> None:
+    def _record_success(
+        self, data: dict[str, Any], token: str | None, prepaid: dict[str, Any] | None, profile: dict[str, Any] | None = None,
+    ) -> None:
         """Apply common state updates after a successful API response.
 
         Parameters
@@ -450,6 +457,9 @@ class UsageCache:
         prepaid : dict or None
             Prepaid credit balance fetched in the same cycle, or None when
             unavailable.
+        profile : dict or None
+            Profile fetched together with the usage, or None to keep the
+            current one.
         """
         # _usage is always reassigned (never mutated in place), so existing
         # CacheSnapshot references remain valid after this update.
@@ -462,6 +472,8 @@ class UsageCache:
             self._usage = data
             self._usage_token = token
             self._prepaid = prepaid
+            if profile is not None:
+                self._profile = profile
             self._refreshing = False
             self._version += 1
 
@@ -506,7 +518,7 @@ class UsageCache:
         else:
             log.info('token already changed, retrying fetch_usage without CLI refresh')
 
-        data = self._fetch_usage()
+        data, _ = self._fetch_usage_and_profile()
         if 'error' not in data:
             log.info('retry -> OK')
             self._record_success(data, current_token, self._fetch_prepaid_balance(data))

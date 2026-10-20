@@ -44,7 +44,7 @@ The label of the default Claude configuration directory, `~/.claude`, is `defaul
 
 After an error, `data` holds `error`. After HTTP 429, `data` also holds `rate_limited: true` and `retry_after` in seconds. After a good refresh, each quota is an object with `utilization` in percent and `resets_at`. A quota that the account does not have is `null`.
 
-For the Codex account, `data` holds the Codex limits in the same shape. The app names each field after the length of its window, for example `five_hour` or `seven_day`. A limit with another name adds that name, for example `seven_day_gpt_5_codex`. The file layout and the schema version stay the same.
+For the Codex account, `data` holds the Codex limits in the same shape. The app names each field after the length of its window, for example `five_hour` or `seven_day`. A window without a number word in its name uses digits, for example `15_minute` or `30_day`. A limit with another name adds that name, for example `seven_day_gpt_5_codex`. The file layout and the schema version stay the same.
 
 ## Rules for a reader
 
