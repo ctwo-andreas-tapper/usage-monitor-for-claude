@@ -48,7 +48,7 @@ When a background token refresh installs a new Claude CLI version, the app shows
 
 ## Codex
 
-If the Codex CLI is installed and signed in (`codex login`), the app monitors its usage limits as one more account. The account appears as `codex`. Its limits use the same bars as the Claude limits.
+If the Codex CLI is installed and signed in with a ChatGPT account (`codex login`), the app monitors its usage limits as one more account. The account appears as `codex`. Its limits use the same bars as the Claude limits.
 
 | Key | Default | Description |
 |-----|---------|-------------|

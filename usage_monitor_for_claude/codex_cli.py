@@ -39,6 +39,7 @@ CODEX_ACCOUNT_LABEL = 'codex'
 _SESSION_TIMEOUT = 30.0
 _EXIT_TIMEOUT = 5.0
 _BASE_LIMIT_ID = 'codex'
+_CHATGPT_ACCOUNT_TYPE = 'chatgpt'
 _WINDOW_KEYS = ('primary', 'secondary')
 
 _ID_INITIALIZE = 1
@@ -103,18 +104,18 @@ def detect_codex_account(existing: list[Account]) -> Account | None:
     -------
     Account or None
         An account for the Codex home when ``monitor_codex`` is on, the
-        CLI is installed and the CLI is signed in.  An ``auth.json`` in the
-        home counts as signed in without any process being started; the
-        file is only checked for existence, never read.  Without the file
-        the login may sit in the OS keyring, so one app-server session asks
-        ``account/read``.  A missing home folder is never asked: the
+        CLI is installed and one app-server session reports a ChatGPT login
+        through ``account/read``.  Only a ChatGPT login has rate limits; an
+        API-key login would only ever show an error.  The CLI answers for
+        a login in ``auth.json`` and in the OS keyring alike, so no
+        credential file is read.  A missing home folder is never asked: the
         app-server exits with an error for it.
     """
     if not MONITOR_CODEX or CODEX_CLI_PATH is None:
         return None
 
     home = codex_home()
-    if not (home / 'auth.json').is_file() and not (home.is_dir() and _is_signed_in(Account(home, CODEX_ACCOUNT_LABEL, PROVIDER_CODEX))):
+    if not home.is_dir() or not _has_chatgpt_login(Account(home, CODEX_ACCOUNT_LABEL, PROVIDER_CODEX)):
         return None
 
     taken = {account.label for account in existing}
@@ -127,8 +128,8 @@ def detect_codex_account(existing: list[Account]) -> Account | None:
     return Account(home, label, PROVIDER_CODEX)
 
 
-def _is_signed_in(account: Account) -> bool:
-    """Return whether the CLI reports a signed-in account; any failure counts as not signed in."""
+def _has_chatgpt_login(account: Account) -> bool:
+    """Return whether the CLI reports a ChatGPT login; any failure counts as no login."""
     try:
         replies = _run_session(account, [(_ID_ACCOUNT, 'account/read', {'refreshToken': False})])
     except (_CodexUnavailableError, OSError, TimeoutError) as error:
@@ -138,7 +139,7 @@ def _is_signed_in(account: Account) -> bool:
     result = replies[_ID_ACCOUNT].get('result')
     codex_account = result.get('account') if isinstance(result, dict) else None
 
-    return isinstance(codex_account, dict) and bool(codex_account)
+    return isinstance(codex_account, dict) and codex_account.get('type') == _CHATGPT_ACCOUNT_TYPE
 
 
 def fetch_usage(account: Account) -> dict[str, Any]:
