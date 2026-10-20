@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import threading
 import unittest
 from pathlib import Path
@@ -119,6 +120,54 @@ class TestDiscoverCliPath(unittest.TestCase):
     def test_none_when_nothing_found(self, _which):
         with TemporaryDirectory() as tmp, patch.dict(os.environ, {'APPDATA': tmp}):
             self.assertIsNone(_discover_cli_path())
+
+
+class TestDiscoverCliPathIgnoresWorkingDirectory(unittest.TestCase):
+    """A ``codex`` planted in the working directory must never be picked up (Windows searches it by default)."""
+
+    def _make_cli(self, folder: Path) -> Path:
+        name = 'codex.cmd' if sys.platform == 'win32' else 'codex'
+        cli = folder / name
+        cli.write_text('')
+        cli.chmod(0o755)
+        return cli
+
+    def _discover(self, path_entries: list[str], working_dir: Path, appdata: Path) -> Path | None:
+        environment = {'PATH': os.pathsep.join(path_entries), 'APPDATA': str(appdata), 'PATHEXT': '.COM;.EXE;.BAT;.CMD'}
+        previous = os.getcwd()
+        os.chdir(working_dir)
+        try:
+            with patch.dict(os.environ, environment):
+                os.environ.pop('NoDefaultCurrentDirectoryInExePath', None)
+                return _discover_cli_path()
+        finally:
+            os.chdir(previous)
+
+    def test_path_install_wins_over_planted_file(self):
+        with TemporaryDirectory() as planted, TemporaryDirectory() as installed, TemporaryDirectory() as appdata:
+            self._make_cli(Path(planted))
+            real = self._make_cli(Path(installed))
+            found = self._discover([installed], Path(planted), Path(appdata))
+        self.assertEqual(os.path.normcase(str(found)), os.path.normcase(str(real)))
+
+    def test_planted_file_alone_is_not_found(self):
+        with TemporaryDirectory() as planted, TemporaryDirectory() as empty, TemporaryDirectory() as appdata:
+            self._make_cli(Path(planted))
+            self.assertIsNone(self._discover([empty], Path(planted), Path(appdata)))
+
+    def test_relative_path_entries_are_skipped(self):
+        with TemporaryDirectory() as planted, TemporaryDirectory() as appdata:
+            relative_bin = Path(planted) / 'bin'
+            relative_bin.mkdir()
+            self._make_cli(relative_bin)
+            self._make_cli(Path(planted))
+            self.assertIsNone(self._discover(['.', 'bin', ''], Path(planted), Path(appdata)))
+
+    def test_found_path_is_absolute(self):
+        with TemporaryDirectory() as installed, TemporaryDirectory() as appdata:
+            self._make_cli(Path(installed))
+            found = self._discover([installed], Path(appdata), Path(appdata))
+        self.assertTrue(found is not None and found.is_absolute())
 
 
 class TestCodexHome(unittest.TestCase):

@@ -52,13 +52,14 @@ def _discover_cli_path() -> Path | None:
 
     Strategy
     --------
-    1. ``shutil.which('codex')`` - respects PATH and PATHEXT.  A typical npm
-       install resolves to a shim next to ``codex.cmd``.
+    1. Search the absolute ``PATH`` entries, honouring PATHEXT.  A typical
+       npm install resolves to a shim next to ``codex.cmd``.  The working
+       directory is never searched (see ``_which_on_path``).
     2. A ``.ps1`` shim is replaced by its sibling ``.cmd`` or ``.exe``,
        because ``subprocess`` cannot execute PowerShell scripts.
     3. Fall back to the standard npm location at ``%APPDATA%\\npm``.
     """
-    found = shutil.which('codex')
+    found = _which_on_path('codex')
     if found:
         path = Path(found)
         if path.suffix.lower() == '.ps1':
@@ -74,6 +75,25 @@ def _discover_cli_path() -> Path | None:
             candidate = Path(appdata) / 'npm' / name
             if candidate.is_file():
                 return candidate
+
+    return None
+
+
+def _which_on_path(name: str) -> str | None:
+    """Return the first *name* executable in an absolute ``PATH`` entry, or None.
+
+    ``shutil.which(name)`` on Windows searches the working directory before
+    ``PATH`` unless ``NoDefaultCurrentDirectoryInExePath`` is set, so a
+    ``codex.cmd`` planted there would run instead of the real CLI.  A name
+    with a directory part is checked only at that location, with PATHEXT.
+    """
+    for entry in os.environ.get('PATH', '').split(os.pathsep):
+        if not entry or not os.path.isabs(entry):
+            continue
+
+        found = shutil.which(os.path.join(entry, name))
+        if found:
+            return found
 
     return None
 
