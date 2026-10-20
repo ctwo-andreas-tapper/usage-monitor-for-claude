@@ -12,7 +12,11 @@ stores is the email address of each account, in the local snapshot file describe
 
 The application communicates exclusively with `api.anthropic.com` to retrieve your current API usage
 data and, when extra usage is enabled for your account, your prepaid credit balance. No other network
-connections are made.
+connections are made by the application itself.
+
+If the Codex CLI is installed and signed in, the application also starts `codex app-server` and asks it for
+your Codex usage limits. The Codex CLI then makes its own connection to OpenAI. The application makes
+no connection to OpenAI. Set `monitor_codex` to `false` to switch this off.
 
 The server certificate is verified against the Windows certificate store, the same store your browser
 uses. A proxy that your organization has installed with its own root certificate can therefore inspect
@@ -27,6 +31,10 @@ The application reads your existing Claude OAuth token from the local Claude CLI
 - Used solely in HTTP Authorization headers to authenticate with the Anthropic API
 - Never logged, stored elsewhere, copied, or transmitted to any third party
 
+The application never reads Codex credentials. The Codex CLI keeps its login in its own home folder
+(`~/.codex`, or the folder in `CODEX_HOME`), and the application only checks that the file `auth.json`
+exists there.
+
 ## Local Storage
 
 The application keeps usage data in memory. It also writes the last usage state of each account to
@@ -40,6 +48,12 @@ application changes on your system follows - there is nothing else.
   `~/.cache/usage-monitor-for-claude/snapshots/<account>.json` on Linux. The file holds the usage
   numbers, the account email address and the plan name of the last refresh. It holds no token. The
   application replaces the file after each refresh and never deletes it.
+
+The application also writes one snapshot file for the Codex account. It holds the Codex usage numbers, the Codex
+email address and the plan name.
+
+When the application starts `codex app-server`, the Codex CLI writes its own state files in its home
+folder, as it does for any other start. The application does not write there.
 
 **On Windows** no other files are written. Two values are written to the registry, both under
 `HKEY_CURRENT_USER`:

@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from usage_monitor_for_claude.account import Account
+from usage_monitor_for_claude.account import PROVIDER_CODEX, Account
 from usage_monitor_for_claude.app import (
     POLL_FAST, POLL_STAGGER, RESET_BUFFER, AccountMonitor, UsageMonitorForClaude, _align_to_reset,
 )
@@ -3949,6 +3949,31 @@ class TestMultiAccountShell(unittest.TestCase):
             self.assertTrue(self.shell._quick_action_menu_visible())
             self.shell.double_click_installed = True
             self.assertFalse(self.shell._quick_action_menu_visible())
+
+
+class TestCodexAccountMonitor(unittest.TestCase):
+    """A Codex account joins the monitored set like any other account."""
+
+    def setUp(self):
+        codex = Account(Path('/codex/home'), 'codex', PROVIDER_CODEX)
+        self.shell = _make_shell(accounts=[_ACCOUNT_A, codex])
+        self.addCleanup(_cleanup, self.shell)
+
+    def test_labels_shown_for_claude_plus_codex(self):
+        self.assertEqual([monitor.label_prefix for monitor in self.shell.monitors], [f'[{_ACCOUNT_A.label}] ', '[codex] '])
+
+    def test_codex_icon_ready_skips_missing_claude_token_warning(self):
+        monitor = self.shell.monitors[1]
+        with patch.object(monitor, 'poll_loop') as poll:
+            monitor.on_icon_ready(monitor.icon)
+        monitor.icon.notify.assert_not_called()
+        poll.assert_called_once()
+
+    def test_claude_icon_ready_still_warns_without_token(self):
+        monitor = self.shell.monitors[0]
+        with patch.object(monitor, 'poll_loop'), patch('usage_monitor_for_claude.app.api_headers', return_value=None):
+            monitor.on_icon_ready(monitor.icon)
+        monitor.icon.notify.assert_called_once()
 
 
 class TestPollStagger(unittest.TestCase):

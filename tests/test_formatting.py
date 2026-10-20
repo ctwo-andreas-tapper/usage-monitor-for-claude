@@ -14,12 +14,61 @@ from unittest.mock import MagicMock, patch
 
 from usage_monitor_for_claude.formatting import (
     PERIOD_5H, PERIOD_7D,
-    divider_positions, elapsed_pct, expand_popup_fields, field_period, format_credits,
+    divider_positions, elapsed_pct, expand_popup_fields, field_name_for_window, field_period, format_credits,
     format_tooltip, parse_field_name, popup_label, time_until, tooltip_label,
 )
 from usage_monitor_for_claude.i18n import LOCALE_DIR
 
 EN = json.loads((LOCALE_DIR / 'en.json').read_text(encoding='utf-8'))
+
+
+# ---------------------------------------------------------------------------
+# field_name_for_window
+# ---------------------------------------------------------------------------
+
+class TestFieldNameForWindow(unittest.TestCase):
+    """Tests for field_name_for_window()."""
+
+    def test_five_hours(self):
+        self.assertEqual(field_name_for_window(300), 'five_hour')
+
+    def test_seven_days(self):
+        self.assertEqual(field_name_for_window(10080), 'seven_day')
+
+    def test_whole_days_win_over_hours(self):
+        self.assertEqual(field_name_for_window(1440), 'one_day')
+        self.assertEqual(field_name_for_window(2880), 'two_day')
+
+    def test_one_hour(self):
+        self.assertEqual(field_name_for_window(60), 'one_hour')
+
+    def test_twelve_hours(self):
+        self.assertEqual(field_name_for_window(720), 'twelve_hour')
+
+    def test_thirteen_hours_has_no_number_word(self):
+        self.assertIsNone(field_name_for_window(780))
+
+    def test_thirteen_days_has_no_number_word(self):
+        self.assertIsNone(field_name_for_window(13 * 1440))
+
+    def test_not_a_whole_hour(self):
+        self.assertIsNone(field_name_for_window(90))
+
+    def test_zero_and_negative(self):
+        self.assertIsNone(field_name_for_window(0))
+        self.assertIsNone(field_name_for_window(-300))
+
+    def test_wrong_type(self):
+        self.assertIsNone(field_name_for_window(True))
+        self.assertIsNone(field_name_for_window('300'))  # type: ignore[arg-type]  # deliberate wrong type
+
+    def test_round_trips_through_parse_field_name(self):
+        for minutes in (60, 180, 300, 720, 1440, 4320, 10080, 12 * 1440):
+            parsed = parse_field_name(field_name_for_window(minutes))  # type: ignore[arg-type]  # name is not None here
+            self.assertIsNotNone(parsed)
+            number, unit, variant = parsed  # type: ignore[misc]  # checked above
+            self.assertEqual(number * (1440 if unit == 'day' else 60), minutes)
+            self.assertIsNone(variant)
 
 
 # ---------------------------------------------------------------------------

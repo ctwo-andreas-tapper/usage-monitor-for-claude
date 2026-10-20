@@ -15,7 +15,8 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from .account import Account
+from . import codex_cli
+from .account import PROVIDER_CODEX, Account
 from .api import fetch_prepaid_credits, fetch_profile, fetch_usage, read_access_token
 from .claude_cli import RefreshResult, refresh_token
 from .settings import MAX_BACKOFF, POLL_FAST, POLL_INTERVAL
@@ -217,7 +218,7 @@ class UsageCache:
 
             log.info('fetch_profile started')
             with self._lock:
-                profile = fetch_profile(self.account)
+                profile = self._fetch_profile()
             with self._state_lock:
                 self._profile = profile
                 self._profile_token = current_token
@@ -321,7 +322,7 @@ class UsageCache:
         """Fetch usage data and process the response."""
         token_before = read_access_token(self.account)
         log.info('fetch_usage started')
-        data = fetch_usage(self.account)
+        data = self._fetch_usage()
 
         if 'error' in data:
             self._record_error(data)
@@ -358,6 +359,20 @@ class UsageCache:
         self._record_success(data, token_before, self._fetch_prepaid_balance(data))
         return UpdateResult(data=data, token=token_before)
 
+    def _fetch_usage(self) -> dict[str, Any]:
+        """Fetch usage from the provider of this cache's account."""
+        if self.account.provider == PROVIDER_CODEX:
+            return codex_cli.fetch_usage(self.account)
+
+        return fetch_usage(self.account)
+
+    def _fetch_profile(self) -> dict[str, Any] | None:
+        """Fetch the profile from the provider of this cache's account."""
+        if self.account.provider == PROVIDER_CODEX:
+            return codex_cli.fetch_profile(self.account)
+
+        return fetch_profile(self.account)
+
     def _fetch_prepaid_balance(self, usage: dict[str, Any]) -> dict[str, Any] | None:
         """Return the prepaid credit balance for the current organization.
 
@@ -374,6 +389,9 @@ class UsageCache:
         usage : dict
             Successful usage response of the current cycle.
         """
+        if self.account.provider == PROVIDER_CODEX:
+            return None
+
         if not (usage.get('extra_usage') or {}).get('is_enabled'):
             return None
 
@@ -488,7 +506,7 @@ class UsageCache:
         else:
             log.info('token already changed, retrying fetch_usage without CLI refresh')
 
-        data = fetch_usage(self.account)
+        data = self._fetch_usage()
         if 'error' not in data:
             log.info('retry -> OK')
             self._record_success(data, current_token, self._fetch_prepaid_balance(data))

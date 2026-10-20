@@ -15,7 +15,7 @@ from .i18n import T
 from .settings import CURRENCY_SYMBOL, TIME_FORMAT, TOOLTIP_FIELDS, _SYSTEM_CURRENCY_SYMBOL
 
 __all__ = [
-    'divider_positions', 'elapsed_pct', 'expand_popup_fields', 'field_period', 'format_credits',
+    'divider_positions', 'elapsed_pct', 'expand_popup_fields', 'field_name_for_window', 'field_period', 'format_credits',
     'format_tooltip', 'parse_field_name', 'popup_label', 'time_until', 'tooltip_label',
 ]
 
@@ -61,6 +61,38 @@ def parse_field_name(field: str) -> tuple[int, str, str | None] | None:
 
     variant = parts[2] if len(parts) > 2 else None
     return (number, unit, variant)
+
+
+def field_name_for_window(minutes: int) -> str | None:
+    """Return the quota field name for a window of *minutes* (inverse of ``parse_field_name``).
+
+    Parameters
+    ----------
+    minutes : int
+        Window length in minutes.
+
+    Returns
+    -------
+    str or None
+        ``'seven_day'`` for 10080, ``'five_hour'`` for 300, and so on.  Whole
+        days win over hours.  None when the length is not a whole number of
+        hours or the count has no number word (1 to 12).
+    """
+    if isinstance(minutes, bool) or not isinstance(minutes, int) or minutes <= 0:
+        return None
+
+    if minutes % 1440 == 0:
+        count, unit = minutes // 1440, 'day'
+    elif minutes % 60 == 0:
+        count, unit = minutes // 60, 'hour'
+    else:
+        return None
+
+    for word, number in _NUMBER_WORDS.items():
+        if number == count:
+            return f'{word}_{unit}'
+
+    return None
 
 
 def _title_case_variant(text: str) -> str:

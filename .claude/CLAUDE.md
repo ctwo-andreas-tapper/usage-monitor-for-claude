@@ -102,7 +102,7 @@ Prioritize readability and auditability - users handle credentials and must be a
 ## Security & Transparency
 - All URLs and API endpoints as top-level constants - no dynamic URL construction
 - `API_URL_PREPAID_CREDITS` is the one endpoint carrying a path parameter, and it stays the only one: the prepaid balance is addressed per organization, so the uuid cannot be known at build time. It is a single constant with one `{org_uuid}` placeholder, and `fetch_prepaid_credits()` matches the value against `_ORG_UUID_PATTERN` before substituting it, abandoning the request when it does not match - so the substituted segment can only ever be hex digits and dashes, never a slash, a dot-dot or a scheme. The pattern is anchored `\A...\Z`, not `^...$`: `$` also matches before a trailing newline, and `tests/test_api.py` covers exactly that case. A future endpoint needing a path parameter follows this shape - one constant, one placeholder, validated before substitution - or it does not ship
-- Network communication exclusively with `api.anthropic.com` - no other destinations (the one exception is the Windows chain engine's own traffic, see "TLS Verification")
+- The monitor's own network communication goes exclusively to `api.anthropic.com` - no other destinations (the one exception is the Windows chain engine's own traffic, see "TLS Verification"). A signed-in Codex CLI makes its own connection to OpenAI when `codex app-server` runs; that traffic is the CLI's, not the monitor's (see "Codex")
 - Credentials used only in HTTP Authorization headers - never log, store, or transmit elsewhere
 - On both platforms the app writes one snapshot file per account (`snapshot.py`, see "Snapshot File"). Apart from that, the app writes no files **on Windows**, where the only other system state it changes is two `HKCU` registry values: the notification identity and the autostart entry (both in `platforms/win32.py`). On Linux the same two concerns need files: the autostart entry is an XDG `.desktop` file in `~/.config/autostart/`, and the single-instance guard holds a `0600` lock file in `$XDG_RUNTIME_DIR`. Nothing else is ever written
 - Any new persistent write needs a matching update in `README.md` and `PRIVACY.md`, per platform. The list of what the app touches is part of the audit story and must never become inaccurate
@@ -112,6 +112,15 @@ Prioritize readability and auditability - users handle credentials and must be a
 - Modular package architecture in `usage_monitor_for_claude/` - small focused modules are easier to audit than one large file
 - Pure data files (translations, config) stay separate - they contain no logic or credential access
 - Minimal, well-known dependencies only (e.g., requests, Pillow, pystray)
+
+## Codex
+- `codex_cli.py` is the only Codex interface, and it talks to `codex app-server` (newline-delimited JSON-RPC on stdin/stdout) and nothing else. The monitor never reads Codex credentials (`auth.json` is only checked for existence in `detect_codex_account()`), opens no connection to OpenAI, and never parses Codex state files. `api.py` must not import `codex_cli` or gain any OpenAI code
+- A Codex account is an `Account` with `provider=PROVIDER_CODEX` whose `config_dir` is the Codex home (`CODEX_HOME`, else `~/.codex`). `UsageCache` dispatches on `account.provider`: Codex has no prepaid fetch and no token refresh. `api.read_access_token()` returns None for a non-Claude account, so the token watcher and account-switch checks stay idle
+- `codex_cli.fetch_usage()` never sets `auth_error` or `rate_limited`. Those flags start Claude-only paths (`claude update`, 429 backoff); a Codex error is a plain `{'error': ...}`
+- The Codex account is appended in `__main__.py` after the Claude accounts. It never enters `--config-dir`, `resolve_config_dirs()`, `launch_suffix()` or the autostart argument, so the autostart entry name does not change
+- The app-server exits on stdin EOF before it answers pending requests. `subprocess.run(input=...)` therefore never works: keep stdin open, read replies on a reader thread with a deadline, then close stdin and end the process (kill when it does not exit)
+- Quota field names come from the window length in minutes (`formatting.field_name_for_window()`), never from a hardcoded `five_hour` / `seven_day`: a plan with other windows still works. A limit id other than `codex` adds a slug suffix. The response is undocumented, so every nested block gets an `isinstance` check
+- The `monitor_codex` setting (default `true`) switches the whole feature off. Any new file the Codex path writes needs `README.md` and `PRIVACY.md` updated
 
 ## Snapshot File
 - `snapshot.py` writes one JSON file per account to `snapshots_dir()` after every fetch that returns data (`AccountMonitor.update()`). Other local programs read these files, so the schema is a public contract, documented in `docs/snapshot-file.md`
