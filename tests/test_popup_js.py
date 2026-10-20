@@ -225,10 +225,26 @@ console.log(JSON.stringify({
 }));
 ''')
         self.assertEqual(result['blockCount'], 2)
-        self.assertEqual(result['names'], ['a@example.com', 'b@example.com'])
+        self.assertEqual(result['names'], ['a - a@example.com', 'b - b@example.com'])
         self.assertEqual(result['firstBar'], {'label': 'Session', 'pct': '40%', 'badges': 0})
         self.assertEqual(result['secondPct'], '70%')
         self.assertFalse(result['accountSectionVisible'])
+
+    def test_multi_account_heading_names_label_and_email(self):
+        """Each account block heading carries the label, so two accounts with
+        the same email stay apart; without an email the label stands alone."""
+        result = _run_scenario('''
+els = makeEls();
+updateData(makeData({
+    accounts: [
+        makeAccount({ label: 'default', email: 'same@example.com' }),
+        makeAccount({ index: 1, label: 'codex', email: 'same@example.com' }),
+        makeAccount({ index: 2, label: 'work2', email: '', error: 'signed out' }),
+    ],
+}));
+console.log(JSON.stringify(els.usageBars.children.map((block) => block.querySelector('.account-name').textContent)));
+''')
+        self.assertEqual(result, ['default - same@example.com', 'codex - same@example.com', 'work2'])
 
     def test_single_account_bars_are_labelled_and_have_no_blocks(self):
         """A lone account keeps the flat labelled-bar layout with the identity
