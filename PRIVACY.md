@@ -11,7 +11,11 @@ This application does **not** collect, store, or transmit any personal data.
 
 The application communicates exclusively with `api.anthropic.com` to retrieve your current API usage
 data and, when extra usage is enabled for your account, your prepaid credit balance. No other network
-connections are made.
+connections are made by the application itself.
+
+If the Codex CLI is installed and signed in, the application also starts `codex app-server` and asks it for
+your Codex usage limits. The Codex CLI then makes its own connection to OpenAI. The application makes
+no connection to OpenAI. Set `monitor_codex` to `false` to switch this off.
 
 The server certificate is verified against the Windows certificate store, the same store your browser
 uses. A proxy that your organization has installed with its own root certificate can therefore inspect
@@ -26,11 +30,19 @@ The application reads your existing Claude OAuth token from the local Claude CLI
 - Used solely in HTTP Authorization headers to authenticate with the Anthropic API
 - Never logged, stored elsewhere, copied, or transmitted to any third party
 
+The application never reads Codex credentials. The Codex CLI keeps its login in its own home folder
+(`~/.codex`, or the folder in `CODEX_HOME`) or in the operating system keyring. When the application
+starts, it asks the Codex CLI whether you are signed in with a ChatGPT account. It never reads the
+login file or the keyring itself.
+
 ## Local Storage
 
 All usage data is kept in memory only and discarded when the application closes. An optional
 settings file (`usage-monitor-settings.json`) is read-only. The complete list of what the
 application changes on your system follows - there is nothing else.
+
+When the application starts `codex app-server`, the Codex CLI writes its own state files in its home
+folder, as it does for any other start. The application does not write there.
 
 **On Windows** no files are written at all. Two values are written to the registry, both under
 `HKEY_CURRENT_USER`:

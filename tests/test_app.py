@@ -12,12 +12,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from usage_monitor_for_claude.account import Account
+from usage_monitor_for_claude.account import PROVIDER_CODEX, Account
 from usage_monitor_for_claude.app import (
     POLL_FAST, POLL_STAGGER, RESET_BUFFER, AccountMonitor, UsageMonitorForClaude, _align_to_reset,
 )
 from usage_monitor_for_claude.cache import UpdateResult
 from usage_monitor_for_claude.claude_cli import RefreshResult
+from usage_monitor_for_claude.i18n import T
 
 _ACCOUNT_A = Account(Path('/claude/a'), 'a')
 _ACCOUNT_B = Account(Path('/claude/b'), 'b')
@@ -797,6 +798,19 @@ class TestResetNotifications(unittest.TestCase):
         """Notification fires when 5h usage drops from >95% with 7d not blocking."""
         self.app._prev_utilization = {'five_hour': 97.0, 'seven_day': 50.0}
         data = {'five_hour': {'utilization': 10.0}, 'seven_day': {'utilization': 50.0}}
+        self.app.cache = MagicMock()
+        self.app.cache.update.return_value = UpdateResult(data=data)
+
+        self.app.update()
+
+        self.app.icon.notify.assert_called_once()
+
+    @patch('usage_monitor_for_claude.app.format_tooltip', return_value='tooltip')
+    @patch('usage_monitor_for_claude.app.create_icon_image')
+    def test_minute_window_uses_short_window_threshold(self, _icon, _tooltip):
+        """A minute window notifies a reset from 97%, like an hour window; a day window needs more than 98%."""
+        self.app._prev_utilization = {'15_minute': 97.0}
+        data = {'15_minute': {'utilization': 10.0}}
         self.app.cache = MagicMock()
         self.app.cache.update.return_value = UpdateResult(data=data)
 
@@ -3771,6 +3785,73 @@ class TestMultiAccountShell(unittest.TestCase):
             self.assertTrue(self.shell._quick_action_menu_visible())
             self.shell.double_click_installed = True
             self.assertFalse(self.shell._quick_action_menu_visible())
+
+
+class TestCodexAccountMonitor(unittest.TestCase):
+    """A Codex account joins the monitored set like any other account."""
+
+    def setUp(self):
+        codex = Account(Path('/codex/home'), 'codex', PROVIDER_CODEX)
+        self.shell = _make_shell(accounts=[_ACCOUNT_A, codex])
+        self.addCleanup(_cleanup, self.shell)
+
+    def test_labels_shown_for_claude_plus_codex(self):
+        self.assertEqual([monitor.label_prefix for monitor in self.shell.monitors], [f'[{_ACCOUNT_A.label}] ', '[codex] '])
+
+    def test_codex_icon_ready_skips_missing_claude_token_warning(self):
+        monitor = self.shell.monitors[1]
+        with patch.object(monitor, 'poll_loop') as poll:
+            monitor.on_icon_ready(monitor.icon)
+        monitor.icon.notify.assert_not_called()
+        poll.assert_called_once()
+
+    def test_claude_icon_ready_still_warns_without_token(self):
+        monitor = self.shell.monitors[0]
+        with patch.object(monitor, 'poll_loop'), patch('usage_monitor_for_claude.app.api_headers', return_value=None):
+            monitor.on_icon_ready(monitor.icon)
+        monitor.icon.notify.assert_called_once()
+
+
+class TestCodexAccountSwitch(unittest.TestCase):
+    """A Codex login change is announced through the same path as a Claude account switch."""
+
+    def setUp(self):
+        self.codex = Account(Path('/codex/home'), 'codex', PROVIDER_CODEX)
+        self.shell = _make_shell(accounts=[self.codex])
+        self.monitor = self.shell.monitors[0]
+        self.addCleanup(_cleanup, self.shell)
+        patcher = patch('usage_monitor_for_claude.app.run_event_command')
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _poll(self, uuid, email, utilization):
+        usage = {'seven_day': {'utilization': utilization, 'resets_at': '2026-10-27T06:48:50+00:00'}}
+        profile = {'account': {'uuid': uuid, 'email': email}, 'organization': {'organization_type': 'plus'}}
+        with patch('usage_monitor_for_claude.cache.codex_cli.fetch_usage_and_profile', return_value=(usage, profile)), \
+             patch('usage_monitor_for_claude.app.format_tooltip', return_value='tooltip'), \
+             patch('usage_monitor_for_claude.app.create_icon_image'):
+            self.monitor.update(force=True)
+
+    def test_uuid_change_announces_switch_and_resets_baselines(self):
+        self._poll('acc-1', 'first@example.com', 99.0)
+        self.monitor.icon.notify.reset_mock()
+        self.assertEqual(self.monitor._prev_account_uuid, 'acc-1')
+
+        self._poll('acc-2', 'second@example.com', 3.0)
+
+        self.monitor.icon.notify.assert_called_once()
+        self.assertIn('second@example.com', self.monitor.icon.notify.call_args[0][0])
+        self.assertEqual(self.monitor._prev_account_uuid, 'acc-2')
+        self.assertEqual(self.monitor._prev_utilization, {})
+
+    def test_same_account_drop_is_a_normal_reset_not_a_switch(self):
+        self._poll('acc-1', 'first@example.com', 99.0)
+        self.monitor.icon.notify.reset_mock()
+
+        self._poll('acc-1', 'first@example.com', 3.0)
+
+        titles = [call[0][1] for call in self.monitor.icon.notify.call_args_list]
+        self.assertFalse(any(T['notify_account_switched_title'] in title for title in titles))
 
 
 class TestPollStagger(unittest.TestCase):

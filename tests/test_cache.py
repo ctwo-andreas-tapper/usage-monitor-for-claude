@@ -11,7 +11,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from usage_monitor_for_claude.account import Account
+from usage_monitor_for_claude.account import PROVIDER_CODEX, Account
 from usage_monitor_for_claude.cache import CacheSnapshot, RateLimitBackoff, UpdateResult, UsageCache
 from usage_monitor_for_claude.claude_cli import RefreshResult
 
@@ -1270,6 +1270,111 @@ class TestBackoffIsPerAccount(unittest.TestCase):
         cache_a = UsageCache(Account(Path('/claude/a'), 'a'))
         cache_b = UsageCache(Account(Path('/claude/b'), 'b'))
         self.assertIsNot(cache_a._rate_limit, cache_b._rate_limit)
+
+
+# ---------------------------------------------------------------------------
+# Codex account
+# ---------------------------------------------------------------------------
+
+_CODEX_ACCOUNT = Account(Path('/codex/home'), 'codex', PROVIDER_CODEX)
+_CODEX_USAGE = {'seven_day': {'utilization': 12.0, 'resets_at': '2026-10-27T06:48:50+00:00'}}
+_CODEX_PROFILE = {'account': {'email': 'dev@example.com', 'uuid': 'acc-1'}, 'organization': {'organization_type': 'plus'}}
+
+
+@patch('usage_monitor_for_claude.cache.refresh_token')
+@patch('usage_monitor_for_claude.cache.fetch_prepaid_credits')
+@patch('usage_monitor_for_claude.cache.fetch_profile')
+@patch('usage_monitor_for_claude.cache.fetch_usage')
+class TestCodexAccount(unittest.TestCase):
+    """A Codex cache reads through codex_cli and never touches the Claude paths."""
+
+    @patch('usage_monitor_for_claude.cache.codex_cli.fetch_usage_and_profile', return_value=(_CODEX_USAGE, _CODEX_PROFILE))
+    def test_update_uses_codex_and_not_claude(self, mock_codex, mock_usage, mock_profile, mock_prepaid, mock_refresh):
+        cache = UsageCache(_CODEX_ACCOUNT)
+        result = cache.update()
+        mock_codex.assert_called_once_with(_CODEX_ACCOUNT)
+        self.assertEqual(result.data, _CODEX_USAGE)
+        self.assertEqual(cache.usage, _CODEX_USAGE)
+        self.assertIsNone(result.token)
+        mock_usage.assert_not_called()
+        mock_profile.assert_not_called()
+        mock_prepaid.assert_not_called()
+        mock_refresh.assert_not_called()
+
+    @patch('usage_monitor_for_claude.cache.codex_cli.fetch_profile', return_value=_CODEX_PROFILE)
+    def test_profile_uses_codex_and_is_fetched_once(self, mock_codex, _usage, mock_profile, _prepaid, _refresh):
+        cache = UsageCache(_CODEX_ACCOUNT)
+        cache.ensure_profile()
+        cache.ensure_profile()
+        mock_codex.assert_called_once_with(_CODEX_ACCOUNT)
+        self.assertEqual(cache.profile, _CODEX_PROFILE)
+        mock_profile.assert_not_called()
+
+    @patch('usage_monitor_for_claude.cache.codex_cli.fetch_usage_and_profile')
+    def test_poll_stores_profile_with_usage(self, mock_codex, _usage, _profile, _prepaid, _refresh):
+        mock_codex.return_value = (_CODEX_USAGE, _CODEX_PROFILE)
+        cache = UsageCache(_CODEX_ACCOUNT)
+        cache.update()
+        self.assertEqual(cache.profile, _CODEX_PROFILE)
+
+    @patch('usage_monitor_for_claude.cache.codex_cli.fetch_profile')
+    @patch('usage_monitor_for_claude.cache.codex_cli.fetch_usage_and_profile')
+    def test_second_poll_with_other_account_replaces_profile(self, mock_codex, mock_codex_profile, _usage, _profile, _prepaid, _refresh):
+        other_profile = {'account': {'email': 'other@example.com', 'uuid': 'acc-2'}, 'organization': {'organization_type': 'pro'}}
+        mock_codex.side_effect = [(_CODEX_USAGE, _CODEX_PROFILE), (_CODEX_USAGE, other_profile)]
+        cache = UsageCache(_CODEX_ACCOUNT)
+        cache.update()
+        cache.update(force=True)
+        self.assertEqual(cache.profile, other_profile)
+        self.assertEqual(mock_codex.call_count, 2)
+        cache.ensure_profile()
+        mock_codex_profile.assert_not_called()
+
+    @patch('usage_monitor_for_claude.cache.codex_cli.fetch_usage_and_profile')
+    def test_poll_without_profile_keeps_the_old_one(self, mock_codex, _usage, _profile, _prepaid, _refresh):
+        mock_codex.side_effect = [(_CODEX_USAGE, _CODEX_PROFILE), (_CODEX_USAGE, None)]
+        cache = UsageCache(_CODEX_ACCOUNT)
+        cache.update()
+        cache.update(force=True)
+        self.assertEqual(cache.profile, _CODEX_PROFILE)
+
+    @patch('usage_monitor_for_claude.cache.codex_cli.fetch_usage_and_profile')
+    def test_failed_poll_keeps_the_old_profile(self, mock_codex, _usage, _profile, _prepaid, _refresh):
+        other_profile = {'account': {'email': 'other@example.com', 'uuid': 'acc-2'}}
+        mock_codex.side_effect = [(_CODEX_USAGE, _CODEX_PROFILE), ({'error': 'x'}, other_profile)]
+        cache = UsageCache(_CODEX_ACCOUNT)
+        cache.update()
+        cache.update(force=True)
+        self.assertEqual(cache.profile, _CODEX_PROFILE)
+
+    @patch('usage_monitor_for_claude.cache.codex_cli.fetch_usage_and_profile', return_value=({'error': 'Codex CLI not found'}, None))
+    def test_error_does_not_trigger_token_refresh_or_backoff(self, _codex, mock_usage, _profile, _prepaid, mock_refresh):
+        cache = UsageCache(_CODEX_ACCOUNT)
+        result = cache.update()
+        self.assertEqual(result.data, {'error': 'Codex CLI not found'})
+        self.assertIsNone(result.token_refresh)
+        self.assertEqual(cache.last_error, 'Codex CLI not found')
+        self.assertEqual(cache.rate_limit_remaining, 0)
+        mock_usage.assert_not_called()
+        mock_refresh.assert_not_called()
+
+    @patch('usage_monitor_for_claude.cache.codex_cli.fetch_usage_and_profile', return_value=({**_CODEX_USAGE, 'extra_usage': {'is_enabled': True}}, None))
+    def test_no_prepaid_fetch_even_with_extra_usage_and_org_uuid(self, _codex, _usage, _profile, mock_prepaid, _refresh):
+        cache = UsageCache(_CODEX_ACCOUNT)
+        cache._profile = {'organization': {'uuid': '12345678-1234-1234-1234-123456789abc'}}
+        cache.update()
+        mock_prepaid.assert_not_called()
+        self.assertIsNone(cache.prepaid)
+
+    @patch('usage_monitor_for_claude.cache.codex_cli.fetch_usage_and_profile')
+    def test_claude_account_never_calls_codex(self, mock_codex, mock_usage, _profile, _prepaid, _refresh):
+        mock_usage.return_value = _SUCCESS_DATA
+        with patch('usage_monitor_for_claude.cache.read_access_token', return_value='tok'):
+            cache = _make_cache()
+            cache.update()
+        self.assertIsNone(cache.profile)
+        mock_usage.assert_called_once_with(_ACCOUNT)
+        mock_codex.assert_not_called()
 
 
 if __name__ == '__main__':

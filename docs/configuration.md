@@ -46,6 +46,16 @@ When a background token refresh installs a new Claude CLI version, the app shows
 |-----|---------|-------------|
 | `notify_claude_update` | `true` | Show a notification when a background token refresh installs a new Claude CLI version |
 
+## Codex
+
+If the Codex CLI is installed and signed in with a ChatGPT account (`codex login`), the app monitors its usage limits as one more account. The account appears as `codex`. Its limits use the same bars as the Claude limits.
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `monitor_codex` | `true` | Monitor the usage limits of a signed-in Codex CLI. Set to `false` to never start the Codex CLI |
+
+The app finds the Codex CLI on your `PATH`. To use another Codex home folder, set the `CODEX_HOME` environment variable before you start the app.
+
 ## Claude CLI command
 
 The popup lists the Claude Code version of the natively installed CLI and of each IDE extension it finds. Installs it cannot see - most commonly a Claude Code running inside WSL - are missing from that list. Use `cli_command` to have their versions reported as well.
