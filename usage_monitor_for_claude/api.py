@@ -21,7 +21,7 @@ from typing import Any
 import requests
 import truststore
 
-from .account import Account
+from .account import PROVIDER_CLAUDE, Account
 from .i18n import T
 
 __all__ = [
@@ -45,7 +45,13 @@ truststore.inject_into_ssl()
 
 
 def read_access_token(account: Account) -> str | None:
-    """Read the current access token from *account*'s credentials file."""
+    """Read the current access token from *account*'s credentials file.
+
+    Only a Claude account has one; any other provider returns None.
+    """
+    if account.provider != PROVIDER_CLAUDE:
+        return None
+
     if not account.credentials_path.exists():
         return None
 

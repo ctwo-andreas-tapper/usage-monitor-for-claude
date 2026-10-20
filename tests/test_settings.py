@@ -215,6 +215,17 @@ class TestSettingsOverrides(unittest.TestCase):
         """notify_claude_update is overridden by settings; absent keeps the default on."""
         self._assert_overrides({'notify_claude_update': False}, [('notify_claude_update', False)], absent=['alert_time_aware'])
 
+    def test_monitor_codex_override(self):
+        """monitor_codex is overridden by settings; absent keeps the default on."""
+        self._assert_overrides({'monitor_codex': False}, [('monitor_codex', False)], absent=['notify_claude_update'])
+
+    def test_monitor_codex_default_on(self):
+        """Without a settings override, Codex monitoring is on."""
+        with TemporaryDirectory() as app_tmp, TemporaryDirectory() as home_tmp:
+            loaded = _load(Path(app_tmp), Path(home_tmp))
+        self.assertNotIn('monitor_codex', loaded)
+        self.assertTrue(loaded.get('monitor_codex', True))
+
     def test_icon_color_override(self):
         """Icon color dicts are merged, JSON arrays become tuples."""
         settings = {'icon_light': {'fg': [0, 255, 0, 255]}}
@@ -586,6 +597,18 @@ class TestSettingsValidation(unittest.TestCase):
         """String 'true' for alert_time_aware is dropped."""
         result, mock = self._run_validate({'alert_time_aware': 'true'})
         self.assertNotIn('alert_time_aware', result)
+        mock.assert_called_once()
+
+    def test_monitor_codex_false_valid(self):
+        """Boolean false for monitor_codex passes through."""
+        result, mock = self._run_validate({'monitor_codex': False})
+        self.assertIs(result['monitor_codex'], False)
+        mock.assert_not_called()
+
+    def test_monitor_codex_string_dropped(self):
+        """String 'false' for monitor_codex is dropped."""
+        result, mock = self._run_validate({'monitor_codex': 'false'})
+        self.assertNotIn('monitor_codex', result)
         mock.assert_called_once()
 
     def test_notify_claude_update_true_valid(self):

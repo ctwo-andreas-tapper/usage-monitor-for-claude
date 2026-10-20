@@ -16,26 +16,32 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-__all__ = ['DEFAULT_LABEL', 'Account', 'accounts_from_config_dirs', 'default_config_dir', 'is_default_config_dir']
+__all__ = ['DEFAULT_LABEL', 'PROVIDER_CLAUDE', 'PROVIDER_CODEX', 'Account', 'accounts_from_config_dirs', 'default_config_dir', 'is_default_config_dir']
 
 DEFAULT_LABEL = 'default'
+PROVIDER_CLAUDE = 'claude'
+PROVIDER_CODEX = 'codex'
 
 
 @dataclass(frozen=True)
 class Account:
-    """One monitored Claude account.
+    """One monitored account (Claude by default, or the Codex CLI).
 
     Attributes
     ----------
     config_dir : Path
-        Resolved Claude config directory holding this account's login.
+        Resolved config directory holding this account's login.
     label : str
         Short display name: the directory name, ``'default'`` for
         ``~/.claude``, numbered when two directories share a name.
+    provider : str
+        ``PROVIDER_CLAUDE`` (default) or ``PROVIDER_CODEX``.  For Codex,
+        ``config_dir`` is the Codex home.
     """
 
     config_dir: Path
     label: str
+    provider: str = PROVIDER_CLAUDE
 
     @property
     def credentials_path(self) -> Path:
