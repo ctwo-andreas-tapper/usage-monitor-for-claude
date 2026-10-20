@@ -5,7 +5,8 @@ It runs on Windows and Linux.
 
 ## Data Collection
 
-This application does **not** collect, store, or transmit any personal data.
+This application does **not** collect or transmit any personal data. The only personal data that it
+stores is the email address of each account, in the local snapshot file described below.
 
 ## Network Communication
 
@@ -28,11 +29,19 @@ The application reads your existing Claude OAuth token from the local Claude CLI
 
 ## Local Storage
 
-All usage data is kept in memory only and discarded when the application closes. An optional
+The application keeps usage data in memory. It also writes the last usage state of each account to
+a snapshot file. Other local programs can read that file without a network call. An optional
 settings file (`usage-monitor-settings.json`) is read-only. The complete list of what the
 application changes on your system follows - there is nothing else.
 
-**On Windows** no files are written at all. Two values are written to the registry, both under
+**On both platforms** the application writes one [snapshot file](docs/snapshot-file.md) per account:
+
+- `%LOCALAPPDATA%\usage-monitor-for-claude\snapshots\<account>.json` on Windows, or
+  `~/.cache/usage-monitor-for-claude/snapshots/<account>.json` on Linux. The file holds the usage
+  numbers, the account email address and the plan name of the last refresh. It holds no token. The
+  application replaces the file after each refresh and never deletes it.
+
+**On Windows** no other files are written. Two values are written to the registry, both under
 `HKEY_CURRENT_USER`:
 
 - `Software\Classes\AppUserModelId\JensDuttke.UsageMonitorForClaude` - the display name and icon
