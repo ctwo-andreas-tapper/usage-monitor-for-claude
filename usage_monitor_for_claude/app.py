@@ -31,7 +31,7 @@ from .settings import (
     NOTIFY_CLAUDE_UPDATE, ON_RESET_COMMAND, ON_STARTUP_COMMAND, ON_THRESHOLD_COMMAND, POLL_ERROR, POLL_FAST,
     POLL_FAST_EXTRA, POLL_INTERVAL, POLL_STAGGER, QUICK_ACTION_COMMAND, SETTINGS_PATH, get_alert_thresholds,
 )
-from .settings_writer import SettingsWriteError, default_settings_path, save_hidden_accounts
+from .settings_writer import SettingsWriteError, default_settings_path, save_account_visibility
 from .formatting import (
     elapsed_pct, expand_popup_fields, field_period, format_credits, format_tooltip, is_active_quota, parse_field_name, popup_label,
 )
@@ -339,6 +339,7 @@ class AccountMonitor:
             confirmed account switch, where the freshly selected account
             has no polling history that those throttles need to protect.
         """
+        visibility_seen = self._visibility_generation
         result = self.cache.update(force=force)
         # A hide that landed while the request was in flight: the account is
         # paused, so the result raises no toast, command or baseline change.
@@ -372,6 +373,10 @@ class AccountMonitor:
         # When the user runs 'claude auth login', the token changes and the next profile fetch
         # returns a different account UUID, preventing a false quota-reset notification.
         self.cache.ensure_profile()
+        # ensure_profile() can block on a request; a hide (or hide and show)
+        # during it must not let this result run commands or move baselines.
+        if self._hidden or self._visibility_generation != visibility_seen:
+            return
         current_profile = self.cache.profile
         current_account_uuid = (current_profile.get('account') or {}).get('uuid') if isinstance(current_profile, dict) else None
 
@@ -1181,8 +1186,9 @@ class UsageMonitorForClaude:
         The new list goes to the settings file first.  When that fails, the
         error is shown and nothing changes.  On success the account's icon
         and poll loop switch live, the label prefixes follow the new visible
-        count and every menu is rebuilt.  Labels of accounts that are absent
-        from this launch stay in the list.
+        count and every menu is rebuilt.  Only this launch's accounts change
+        in the stored list: the writer reads the file again, so labels that
+        another launch (or a hand edit) put there stay.
 
         Parameters
         ----------
@@ -1202,31 +1208,17 @@ class UsageMonitorForClaude:
 
             hidden_names = {candidate.account.label for candidate in self._all_monitors if candidate.hidden}
             hidden_names = hidden_names | {label} if hide else hidden_names - {label}
-            hidden_labels = self._hidden_labels_for(hidden_names)
+            known_labels = [account.label for account in self.all_accounts]
+            hidden_labels = [name for name in known_labels if name in hidden_names]
             try:
-                save_hidden_accounts(path, hidden_labels)
+                save_account_visibility(path, known_labels, hidden_labels)
             except SettingsWriteError as exc:
                 save_error = exc
             else:
-                self._hidden_labels = hidden_labels
                 self._apply_visibility(monitor, hide)
 
         if save_error is not None:
             show_warning_box(T['settings_save_failed'].format(path=path, error=save_error), T['popup_title'])
-
-    def _hidden_labels_for(self, hidden_names: set[str]) -> list[str]:
-        """Return the ``hidden_accounts`` list to store for the accounts in *hidden_names*.
-
-        The order of the stored list stays; labels without an account are
-        kept, because they belong to an account this launch does not have.
-        """
-        known_labels = {account.label for account in self.all_accounts}
-        hidden_labels = [name for name in self._hidden_labels if name not in known_labels or name in hidden_names]
-        for account in self.all_accounts:
-            if account.label in hidden_names and account.label not in hidden_labels:
-                hidden_labels.append(account.label)
-
-        return hidden_labels
 
     def _apply_visibility(self, monitor: AccountMonitor, hide: bool) -> None:
         """Hide or show *monitor*, then bring labels and menus in line with the new visible set."""

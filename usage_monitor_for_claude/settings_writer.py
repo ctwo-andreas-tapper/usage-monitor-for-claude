@@ -14,7 +14,7 @@ from pathlib import Path
 
 from .settings import SETTINGS_FILENAME
 
-__all__ = ['SettingsWriteError', 'default_settings_path', 'save_hidden_accounts']
+__all__ = ['SettingsWriteError', 'default_settings_path', 'save_account_visibility', 'save_hidden_accounts']
 
 _HIDDEN_ACCOUNTS_KEY = 'hidden_accounts'
 
@@ -58,6 +58,61 @@ def save_hidden_accounts(path: Path, labels: list[str]) -> None:
         settings.pop(_HIDDEN_ACCOUNTS_KEY, None)
 
     _write_atomically(path, json.dumps(settings, indent=2, ensure_ascii=False) + '\n')
+
+
+def save_account_visibility(path: Path, known_labels: list[str], hidden_labels: list[str]) -> list[str]:
+    """Store which of this launch's accounts are hidden, keeping every other label in the file.
+
+    The list is read from disk in the same step as the write, so labels
+    that another app instance with other accounts, or a hand edit, put
+    there since this one started are kept in their place.  Only labels in
+    *known_labels* change: those in *hidden_labels* are kept or appended,
+    the rest are removed.  A stored value that is not a list counts as
+    empty, and entries that are not strings or repeat are dropped.
+
+    Parameters
+    ----------
+    path : Path
+        The settings file to change.
+    known_labels : list[str]
+        Labels of every account in this launch.
+    hidden_labels : list[str]
+        Labels of this launch's accounts that are hidden now.
+
+    Returns
+    -------
+    list[str]
+        The list as stored.
+
+    Raises
+    ------
+    SettingsWriteError
+        When the file cannot be read, is not a JSON object, or cannot be written.
+    """
+    settings = _read_settings_object(path)
+    stored = settings.get(_HIDDEN_ACCOUNTS_KEY)
+    known = set(known_labels)
+    hidden = set(hidden_labels)
+
+    labels: list[str] = []
+    for label in stored if isinstance(stored, list) else []:
+        if not isinstance(label, str) or label in labels:
+            continue
+        if label in known and label not in hidden:
+            continue
+        labels.append(label)
+    for label in hidden_labels:
+        if label not in labels:
+            labels.append(label)
+
+    if labels:
+        settings[_HIDDEN_ACCOUNTS_KEY] = labels
+    else:
+        settings.pop(_HIDDEN_ACCOUNTS_KEY, None)
+
+    _write_atomically(path, json.dumps(settings, indent=2, ensure_ascii=False) + '\n')
+
+    return labels
 
 
 def _read_settings_object(path: Path) -> dict:

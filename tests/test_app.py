@@ -7,6 +7,8 @@ tray rendering, polling interval, and reset notifications.
 """
 from __future__ import annotations
 
+import json
+import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
@@ -4135,7 +4137,7 @@ class TestToggleAccount(unittest.TestCase):
 
     def _toggle(self, shell, label, path=_SETTINGS_FILE, save_side_effect=None):
         with patch('usage_monitor_for_claude.app.SETTINGS_PATH', path), \
-             patch('usage_monitor_for_claude.app.save_hidden_accounts', side_effect=save_side_effect) as save, \
+             patch('usage_monitor_for_claude.app.save_account_visibility', side_effect=save_side_effect) as save, \
              patch('usage_monitor_for_claude.app.show_warning_box') as warning, \
              patch.object(shell, 'on_restart') as restart, \
              patch.object(shell, 'on_quit') as quit_app:
@@ -4145,7 +4147,7 @@ class TestToggleAccount(unittest.TestCase):
     def test_hiding_saves_the_label_and_hides_live(self):
         shell = self._shell([_ACCOUNT_A, _ACCOUNT_B], [])
         save, warning, _restart, _quit = self._toggle(shell, 'b')
-        save.assert_called_once_with(_SETTINGS_FILE, ['b'])
+        save.assert_called_once_with(_SETTINGS_FILE, ['a', 'b'], ['b'])
         warning.assert_not_called()
         self.assertEqual(shell.accounts, [_ACCOUNT_A])
         self.assertFalse(shell._all_monitors[1].icon.visible)
@@ -4153,7 +4155,7 @@ class TestToggleAccount(unittest.TestCase):
     def test_showing_removes_the_label_and_shows_live(self):
         shell = self._shell([_ACCOUNT_A, _ACCOUNT_B], ['b'])
         save, _warning, _restart, _quit = self._toggle(shell, 'b')
-        save.assert_called_once_with(_SETTINGS_FILE, [])
+        save.assert_called_once_with(_SETTINGS_FILE, ['a', 'b'], [])
         self.assertEqual(shell.accounts, [_ACCOUNT_A, _ACCOUNT_B])
         self.assertTrue(shell._all_monitors[1].icon.visible)
 
@@ -4177,26 +4179,27 @@ class TestToggleAccount(unittest.TestCase):
     def test_successive_clicks_use_the_live_state(self):
         shell = self._shell([_ACCOUNT_A, _ACCOUNT_B, _ACCOUNT_C], [])
         save, _warning, _restart, _quit = self._toggle(shell, 'b')
-        save.assert_called_once_with(_SETTINGS_FILE, ['b'])
+        save.assert_called_once_with(_SETTINGS_FILE, ['a', 'b', 'c'], ['b'])
         save, _warning, _restart, _quit = self._toggle(shell, 'c')
-        save.assert_called_once_with(_SETTINGS_FILE, ['b', 'c'])
+        save.assert_called_once_with(_SETTINGS_FILE, ['a', 'b', 'c'], ['b', 'c'])
         save, _warning, _restart, _quit = self._toggle(shell, 'b')
-        save.assert_called_once_with(_SETTINGS_FILE, ['c'])
+        save.assert_called_once_with(_SETTINGS_FILE, ['a', 'b', 'c'], ['c'])
 
-    def test_unknown_labels_stay_in_the_list(self):
+    def test_only_this_launch_labels_are_passed_to_the_writer(self):
+        """Labels this launch does not have are left to the writer, which keeps them from the file."""
         shell = self._shell([_ACCOUNT_A, _ACCOUNT_B], ['codex'])
         save, _warning, _restart, _quit = self._toggle(shell, 'b')
-        save.assert_called_once_with(_SETTINGS_FILE, ['codex', 'b'])
+        save.assert_called_once_with(_SETTINGS_FILE, ['a', 'b'], ['b'])
 
     def test_showing_keeps_other_hidden_labels(self):
         shell = self._shell([_ACCOUNT_A, _ACCOUNT_B, _ACCOUNT_C], ['b', 'c', 'gone'])
         save, _warning, _restart, _quit = self._toggle(shell, 'b')
-        save.assert_called_once_with(_SETTINGS_FILE, ['c', 'gone'])
+        save.assert_called_once_with(_SETTINGS_FILE, ['a', 'b', 'c'], ['c'])
 
     def test_all_hidden_guard_hides_only_the_clicked_account(self):
         shell = self._shell([_ACCOUNT_A, _ACCOUNT_B], ['a', 'b', 'gone'])
         save, _warning, _restart, _quit = self._toggle(shell, 'a')
-        save.assert_called_once_with(_SETTINGS_FILE, ['a', 'gone'])
+        save.assert_called_once_with(_SETTINGS_FILE, ['a', 'b'], ['a'])
         self.assertEqual(shell.accounts, [_ACCOUNT_B])
 
     def test_last_visible_account_cannot_be_hidden(self):
@@ -4218,7 +4221,7 @@ class TestToggleAccount(unittest.TestCase):
         default_path = Path('/home/.claude/usage-monitor-settings.json')
         with patch('usage_monitor_for_claude.app.default_settings_path', return_value=default_path):
             save, _warning, _restart, _quit = self._toggle(shell, 'b', path=None)
-        save.assert_called_once_with(default_path, ['b'])
+        save.assert_called_once_with(default_path, ['a', 'b'], ['b'])
 
     def test_save_failure_shows_the_error_and_changes_nothing(self):
         shell = self._shell([_ACCOUNT_A, _ACCOUNT_B], [])
@@ -4241,7 +4244,21 @@ class TestToggleAccount(unittest.TestCase):
         shell = self._shell([_ACCOUNT_A, _ACCOUNT_B], ['gone'])
         self._toggle(shell, 'b', save_side_effect=SettingsWriteError('disk full'))
         save, _warning, _restart, _quit = self._toggle(shell, 'b')
-        save.assert_called_once_with(_SETTINGS_FILE, ['gone', 'b'])
+        save.assert_called_once_with(_SETTINGS_FILE, ['a', 'b'], ['b'])
+
+    def test_two_instances_keep_each_other_hidden_accounts(self):
+        """Two launches with different account sets share one file; neither click drops the other's choice."""
+        with tempfile.TemporaryDirectory() as folder:
+            settings_file = Path(folder) / 'usage-monitor-settings.json'
+            settings_file.write_text(json.dumps({'poll_interval': 900}), encoding='utf-8')
+            first = self._shell([_ACCOUNT_A, _ACCOUNT_B], [])
+            second = self._shell([_ACCOUNT_C, Account(Path('/d'), 'd')], [])
+            with patch('usage_monitor_for_claude.app.SETTINGS_PATH', settings_file):
+                first.on_toggle_account('b')
+                second.on_toggle_account('d')
+                first.on_toggle_account('b')
+            stored = json.loads(settings_file.read_text(encoding='utf-8'))
+        self.assertEqual(stored, {'poll_interval': 900, 'hidden_accounts': ['d']})
 
     def test_every_icon_menu_is_updated_hidden_ones_too(self):
         shell = self._shell([_ACCOUNT_A, _ACCOUNT_B, _ACCOUNT_C], ['c'])
@@ -4532,6 +4549,48 @@ class TestMonitorVisibility(unittest.TestCase):
             monitor.update()
         run.assert_not_called()
         notify.assert_not_called()
+
+    def _hide_during_profile_fetch(self, monitor, *, show_again=False):
+        """Make ensure_profile() hide the account (and optionally show it again) while it blocks."""
+        def ensure_profile(*_args, **_kwargs):
+            monitor.set_hidden(True)
+            if show_again:
+                monitor.set_hidden(False)
+        monitor.cache.ensure_profile.side_effect = ensure_profile
+
+    def test_hide_during_the_profile_fetch_runs_no_reset_command(self):
+        """A hide that lands while update() waits on the profile request changes nothing afterwards."""
+        for show_again in (False, True):
+            monitor = self._monitor()
+            monitor._prev_account_uuid = 'acc-1'
+            monitor._prev_utilization = {'five_hour': 99.0}
+            monitor.cache.update.return_value = UpdateResult(data={'five_hour': {'utilization': 0, 'resets_at': None}})
+            monitor.cache.profile = {'account': {'uuid': 'acc-1'}}
+            self._hide_during_profile_fetch(monitor, show_again=show_again)
+            with patch('usage_monitor_for_claude.app.ON_RESET_COMMAND', ['cmd']), \
+                 patch('usage_monitor_for_claude.app.read_access_token', return_value=None), \
+                 patch('usage_monitor_for_claude.app.run_event_command') as run, \
+                 patch.object(monitor, '_notify_or_defer') as notify, \
+                 patch.object(monitor, '_check_threshold_alerts') as thresholds:
+                monitor.update()
+            run.assert_not_called()
+            notify.assert_not_called()
+            thresholds.assert_not_called()
+            self.assertFalse(monitor._first_update_done, repr(show_again))
+
+    def test_profile_fetch_without_a_visibility_change_still_processes_the_result(self):
+        monitor = self._monitor()
+        monitor._prev_account_uuid = 'acc-1'
+        monitor._prev_utilization = {'five_hour': 99.0}
+        monitor.cache.update.return_value = UpdateResult(data={'five_hour': {'utilization': 0, 'resets_at': None}})
+        monitor.cache.profile = {'account': {'uuid': 'acc-1'}}
+        with patch('usage_monitor_for_claude.app.ON_RESET_COMMAND', ['cmd']), \
+             patch('usage_monitor_for_claude.app.read_access_token', return_value=None), \
+             patch('usage_monitor_for_claude.app.run_event_command') as run, \
+             patch.object(monitor, '_notify_or_defer'):
+            monitor.update()
+        run.assert_called()
+        self.assertEqual(monitor._prev_utilization, {'five_hour': 0})
 
 
 class TestAccountVisibilityLocale(unittest.TestCase):

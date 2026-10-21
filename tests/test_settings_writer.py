@@ -13,7 +13,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from usage_monitor_for_claude.settings_writer import SettingsWriteError, default_settings_path, save_hidden_accounts
+from usage_monitor_for_claude.settings_writer import SettingsWriteError, default_settings_path, save_account_visibility, save_hidden_accounts
 
 
 class TestDefaultSettingsPath(unittest.TestCase):
@@ -137,3 +137,63 @@ class TestSaveHiddenAccounts(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TestSaveAccountVisibility(unittest.TestCase):
+    """save_account_visibility() merges this launch's accounts into the list on disk."""
+
+    def setUp(self):
+        self._folder = TemporaryDirectory()
+        self.addCleanup(self._folder.cleanup)
+        self.path = Path(self._folder.name) / 'usage-monitor-settings.json'
+
+    def _stored(self):
+        return json.loads(self.path.read_text(encoding='utf-8')).get('hidden_accounts')
+
+    def _write(self, settings):
+        self.path.write_text(json.dumps(settings), encoding='utf-8')
+
+    def test_labels_of_other_launches_stay_in_place(self):
+        self._write({'hidden_accounts': ['other', 'b']})
+        result = save_account_visibility(self.path, ['a', 'b'], ['a'])
+        self.assertEqual(result, ['other', 'a'])
+        self.assertEqual(self._stored(), ['other', 'a'])
+
+    def test_a_label_written_by_another_launch_after_startup_is_kept(self):
+        self._write({'hidden_accounts': ['b']})
+        save_account_visibility(self.path, ['c', 'd'], ['d'])
+        self.assertEqual(self._stored(), ['b', 'd'])
+
+    def test_hidden_labels_already_stored_keep_their_position(self):
+        self._write({'hidden_accounts': ['c', 'gone', 'a']})
+        save_account_visibility(self.path, ['a', 'b', 'c'], ['a', 'b', 'c'])
+        self.assertEqual(self._stored(), ['c', 'gone', 'a', 'b'])
+
+    def test_showing_the_last_hidden_label_removes_the_key(self):
+        self._write({'poll_interval': 900, 'hidden_accounts': ['a']})
+        result = save_account_visibility(self.path, ['a', 'b'], [])
+        self.assertEqual(result, [])
+        self.assertEqual(json.loads(self.path.read_text(encoding='utf-8')), {'poll_interval': 900})
+
+    def test_missing_file_is_created(self):
+        self.assertEqual(save_account_visibility(self.path, ['a', 'b'], ['b']), ['b'])
+        self.assertEqual(self._stored(), ['b'])
+
+    def test_a_value_that_is_not_a_list_starts_from_empty(self):
+        for value in ('work2', 3, None, {'a': True}):
+            self._write({'hidden_accounts': value})
+            self.assertEqual(save_account_visibility(self.path, ['a', 'b'], ['b']), ['b'], repr(value))
+
+    def test_entries_that_are_not_strings_are_dropped(self):
+        self._write({'hidden_accounts': ['gone', 5, None, 'b']})
+        self.assertEqual(save_account_visibility(self.path, ['a', 'b'], ['b']), ['gone', 'b'])
+
+    def test_duplicates_are_stored_once(self):
+        self._write({'hidden_accounts': ['b', 'b', 'gone', 'gone']})
+        self.assertEqual(save_account_visibility(self.path, ['a', 'b'], ['b', 'b']), ['b', 'gone'])
+
+    def test_a_broken_file_is_left_unchanged(self):
+        self.path.write_text('{not json', encoding='utf-8')
+        with self.assertRaises(SettingsWriteError):
+            save_account_visibility(self.path, ['a'], ['a'])
+        self.assertEqual(self.path.read_text(encoding='utf-8'), '{not json')
