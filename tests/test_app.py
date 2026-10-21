@@ -4431,6 +4431,25 @@ class TestMonitorVisibility(unittest.TestCase):
         monitor.cache.update.assert_not_called()
         monitor.cache.ensure_profile.assert_not_called()
 
+    def test_hide_during_the_first_profile_fetch_starts_no_usage_request(self):
+        """The first visible pass loads the profile; a hide during that request pauses before update()."""
+        monitor = self._monitor()
+        monitor.cache.ensure_profile.side_effect = lambda *args, **kwargs: monitor.set_hidden(True)
+        with patch.object(monitor._wake, 'wait', side_effect=self._stop_when_waiting(monitor, calls_before_stop=2)), \
+             patch.object(monitor, '_wait_poll_offset'), \
+             patch.object(monitor, 'update') as update:
+            monitor.poll_loop()
+        update.assert_not_called()
+        monitor.cache.update.assert_not_called()
+
+    def test_update_on_a_hidden_account_starts_no_request(self):
+        """update() itself checks the hidden state before it asks the cache for data."""
+        monitor = self._monitor(hidden=True)
+        with patch.object(monitor, 'render_tray') as render:
+            monitor.update()
+        monitor.cache.update.assert_not_called()
+        render.assert_not_called()
+
     def test_hidden_poll_loop_ends_on_quit(self):
         monitor = self._monitor(hidden=True)
         monitor.running = False

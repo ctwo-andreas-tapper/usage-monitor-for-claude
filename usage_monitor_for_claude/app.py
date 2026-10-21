@@ -339,6 +339,9 @@ class AccountMonitor:
             confirmed account switch, where the freshly selected account
             has no polling history that those throttles need to protect.
         """
+        if self._hidden:
+            return
+
         visibility_seen = self._visibility_generation
         result = self.cache.update(force=force)
         # A hide that landed while the request was in flight: the account is
@@ -915,6 +918,9 @@ class AccountMonitor:
                     continue
                 self.cache.ensure_profile()
                 profile_loaded = True
+                # The profile request can block; a hide during it pauses before any usage request.
+                if self._hidden or not self.running:
+                    continue
 
             visibility_seen = self._visibility_generation
             # Read before the update, not after: an account switch that lands while the
