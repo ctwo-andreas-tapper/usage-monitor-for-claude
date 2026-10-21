@@ -14,6 +14,7 @@
     "autostart": "登录时自动启动",
     "restart": "重新启动",
     "menu_project": "GitHub 项目",
+    "menu_accounts": "账户",
     "test_commands": "测试事件命令",
     "test_reset_5h": "重置 (5小时)",
     "test_reset_7d": "重置 (7天)",
@@ -75,5 +76,6 @@
     "status_next_update": "{duration}后更新",
     "status_refreshing": "刷新中...",
     "already_running": "Usage Monitor for Claude v{running_version} 已在运行中。\n\n是否要替换正在运行的实例？",
-    "replace_failed": "无法替换正在运行的实例。\n\n请手动关闭后重试。"
+    "replace_failed": "无法替换正在运行的实例。\n\n请手动关闭后重试。",
+    "settings_save_failed": "无法保存设置文件:\n{path}\n\n{error}"
 }

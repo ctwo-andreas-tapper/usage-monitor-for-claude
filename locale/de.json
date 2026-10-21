@@ -14,6 +14,7 @@
     "autostart": "Beim Anmelden starten",
     "restart": "Neu starten",
     "menu_project": "Projekt auf GitHub",
+    "menu_accounts": "Konten",
     "test_commands": "Ereignisbefehle testen",
     "test_reset_5h": "Reset (5-Stunden)",
     "test_reset_7d": "Reset (7-Tage)",
@@ -75,5 +76,6 @@
     "status_next_update": "Nächstes Update in {duration}",
     "status_refreshing": "Aktualisiere...",
     "already_running": "Usage Monitor for Claude v{running_version} wird bereits ausgeführt.\n\nMöchten Sie die laufende Instanz ersetzen?",
-    "replace_failed": "Die laufende Instanz konnte nicht ersetzt werden.\n\nBitte beenden Sie sie manuell und versuchen Sie es erneut."
+    "replace_failed": "Die laufende Instanz konnte nicht ersetzt werden.\n\nBitte beenden Sie sie manuell und versuchen Sie es erneut.",
+    "settings_save_failed": "Die Einstellungsdatei konnte nicht gespeichert werden:\n{path}\n\n{error}"
 }

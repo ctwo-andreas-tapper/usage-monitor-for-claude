@@ -14,6 +14,7 @@
     "autostart": "登入時自動啟動",
     "restart": "重新啟動",
     "menu_project": "GitHub 專案",
+    "menu_accounts": "帳戶",
     "test_commands": "測試事件命令",
     "test_reset_5h": "重置 (5小時)",
     "test_reset_7d": "重置 (7天)",
@@ -75,5 +76,6 @@
     "status_next_update": "{duration}後更新",
     "status_refreshing": "重新整理中...",
     "already_running": "Usage Monitor for Claude v{running_version} 已在執行中。\n\n是否要取代正在執行的執行個體？",
-    "replace_failed": "無法取代正在執行的執行個體。\n\n請手動關閉後再試一次。"
+    "replace_failed": "無法取代正在執行的執行個體。\n\n請手動關閉後再試一次。",
+    "settings_save_failed": "無法儲存設定檔:\n{path}\n\n{error}"
 }

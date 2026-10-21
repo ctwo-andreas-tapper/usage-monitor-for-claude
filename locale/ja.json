@@ -14,6 +14,7 @@
     "autostart": "ログイン時に開始",
     "restart": "再起動",
     "menu_project": "GitHubのプロジェクト",
+    "menu_accounts": "アカウント",
     "test_commands": "イベントコマンドをテスト",
     "test_reset_5h": "リセット (5時間)",
     "test_reset_7d": "リセット (7日間)",
@@ -75,5 +76,6 @@
     "status_next_update": "次の更新まで{duration}",
     "status_refreshing": "更新中...",
     "already_running": "Usage Monitor for Claude v{running_version} は既に実行中です。\n\n実行中のインスタンスを置き換えますか？",
-    "replace_failed": "実行中のインスタンスを置き換えられませんでした。\n\n手動で終了してから、もう一度お試しください。"
+    "replace_failed": "実行中のインスタンスを置き換えられませんでした。\n\n手動で終了してから、もう一度お試しください。",
+    "settings_save_failed": "設定ファイルを保存できませんでした:\n{path}\n\n{error}"
 }

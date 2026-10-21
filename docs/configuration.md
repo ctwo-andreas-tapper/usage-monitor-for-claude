@@ -15,7 +15,9 @@ The app searches for this file in these locations (first match wins):
 1. **Next to the EXE** (or project root when running from source)
 2. **`~/.claude/usage-monitor-settings.json`**
 
-The app never creates or modifies this file. Settings are read at startup - after editing the file, use the **Restart** option in the tray context menu to apply changes.
+Settings are read at startup - after editing the file, use the **Restart** option in the tray context menu to apply changes.
+
+The app changes this file only when you hide or show an account in the tray menu (see [Accounts](#accounts)). It then writes only the `hidden_accounts` key. If no settings file exists, it creates `~/.claude/usage-monitor-settings.json`. If the file is not valid JSON, the app does not write to it and shows an error.
 
 ## Alert thresholds
 
@@ -55,6 +57,24 @@ If the Codex CLI is installed and signed in with a ChatGPT account (`codex login
 | `monitor_codex` | `true` | Monitor the usage limits of a signed-in Codex CLI. Set to `false` to never start the Codex CLI |
 
 The app finds the Codex CLI on your `PATH`. To use another Codex home folder, set the `CODEX_HOME` environment variable before you start the app.
+
+## Accounts
+
+With more than one account, the tray menu has an **Accounts** entry. Each account is listed by its label: `default`, the name of its config folder, or `codex`. Click an account to hide it or show it again. The change takes effect at once. The app does not restart.
+
+A hidden account has no visible tray icon, no popup section, no polling, no notifications and no event commands. When you show it again, it polls at once. You cannot hide the last visible account. A hidden account stays in the menu, so you can show it again.
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `hidden_accounts` | `[]` | Labels of the accounts to hide. The tray menu keeps this list. You can also edit it by hand |
+
+```json
+{
+  "hidden_accounts": ["work2", "codex"]
+}
+```
+
+The app ignores a label that matches no account and keeps it in the list. If the list names every account, the app ignores it and shows all accounts. To remove Codex completely, including from the menu, use `monitor_codex`.
 
 ## Claude CLI command
 

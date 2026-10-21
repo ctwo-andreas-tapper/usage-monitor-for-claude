@@ -1282,6 +1282,94 @@ class TestCompactHideDefault(unittest.TestCase):
         self.assertEqual(loaded['compact_hide'], ['account', 'status'])
 
 
+class TestHiddenAccountsSetting(unittest.TestCase):
+    """Tests for the hidden_accounts setting and the exposed settings path."""
+
+    def _run_validate(self, data: dict) -> tuple[dict, MagicMock]:
+        """Run _validate with a mocked warning box and return (result, mock_box)."""
+        mock_box = MagicMock()
+        with patch.object(settings_mod, 'show_warning_box', mock_box):
+            result = settings_mod._validate(dict(data), Path('/fake/settings.json'))
+        return result, mock_box
+
+    def test_exported(self):
+        self.assertIn('HIDDEN_ACCOUNTS', settings_mod.__all__)
+        self.assertIn('SETTINGS_PATH', settings_mod.__all__)
+
+    def test_valid_list(self):
+        result, mock = self._run_validate({'hidden_accounts': ['work2', 'codex']})
+        self.assertEqual(result['hidden_accounts'], ['work2', 'codex'])
+        mock.assert_not_called()
+
+    def test_empty_list_valid(self):
+        result, mock = self._run_validate({'hidden_accounts': []})
+        self.assertEqual(result['hidden_accounts'], [])
+        mock.assert_not_called()
+
+    def test_duplicates_removed_keeping_order(self):
+        result, _ = self._run_validate({'hidden_accounts': ['b', 'a', 'b']})
+        self.assertEqual(result['hidden_accounts'], ['b', 'a'])
+
+    def test_non_list_dropped(self):
+        result, mock = self._run_validate({'hidden_accounts': 'codex'})
+        self.assertNotIn('hidden_accounts', result)
+        mock.assert_called_once()
+
+    def test_non_string_entry_dropped(self):
+        result, mock = self._run_validate({'hidden_accounts': ['a', 3]})
+        self.assertNotIn('hidden_accounts', result)
+        mock.assert_called_once()
+
+    def test_empty_string_entry_dropped(self):
+        result, mock = self._run_validate({'hidden_accounts': ['a', '']})
+        self.assertNotIn('hidden_accounts', result)
+        mock.assert_called_once()
+
+    def test_absent_without_settings_file(self):
+        with TemporaryDirectory() as app_tmp, TemporaryDirectory() as home_tmp:
+            loaded = _load(Path(app_tmp), Path(home_tmp))
+        self.assertNotIn('hidden_accounts', loaded)
+
+    def test_loaded_from_settings_file(self):
+        with TemporaryDirectory() as app_tmp, TemporaryDirectory() as home_tmp:
+            (Path(app_tmp) / settings_mod.SETTINGS_FILENAME).write_text(json.dumps({'hidden_accounts': ['codex']}), encoding='utf-8')
+            loaded = _load(Path(app_tmp), Path(home_tmp))
+        self.assertEqual(loaded['hidden_accounts'], ['codex'])
+
+
+class TestFindSettingsFile(unittest.TestCase):
+    """Tests for the lookup that decides which file is loaded and written back."""
+
+    def _find(self, app_dir: Path, home_dir: Path) -> Path | None:
+        fake_file = str(app_dir / 'usage_monitor_for_claude' / 'settings.py')
+        with patch.object(settings_mod, '__file__', fake_file), patch.object(Path, 'home', return_value=home_dir):
+            found = settings_mod._find_settings_file()
+        return found.resolve() if found else None
+
+    def test_none_without_a_file(self):
+        with TemporaryDirectory() as app_tmp, TemporaryDirectory() as home_tmp:
+            self.assertIsNone(self._find(Path(app_tmp), Path(home_tmp)))
+
+    def test_home_claude_file_found(self):
+        with TemporaryDirectory() as app_tmp, TemporaryDirectory() as home_tmp:
+            claude_dir = Path(home_tmp) / '.claude'
+            claude_dir.mkdir()
+            expected = (claude_dir / settings_mod.SETTINGS_FILENAME)
+            expected.write_text('{}', encoding='utf-8')
+            expected = expected.resolve()
+            self.assertEqual(self._find(Path(app_tmp), Path(home_tmp)), expected)
+
+    def test_app_dir_file_wins(self):
+        with TemporaryDirectory() as app_tmp, TemporaryDirectory() as home_tmp:
+            claude_dir = Path(home_tmp) / '.claude'
+            claude_dir.mkdir()
+            (claude_dir / settings_mod.SETTINGS_FILENAME).write_text('{}', encoding='utf-8')
+            expected = Path(app_tmp) / settings_mod.SETTINGS_FILENAME
+            expected.write_text('{}', encoding='utf-8')
+            expected = expected.resolve()
+            self.assertEqual(self._find(Path(app_tmp), Path(home_tmp)), expected)
+
+
 class TestQuickActionCommandAlias(unittest.TestCase):
     """Tests for resolving the quick action against its former key name."""
 

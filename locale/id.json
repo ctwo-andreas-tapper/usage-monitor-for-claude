@@ -14,6 +14,7 @@
     "autostart": "Mulai saat login",
     "restart": "Mulai Ulang",
     "menu_project": "Proyek di GitHub",
+    "menu_accounts": "Akun",
     "test_commands": "Uji perintah event",
     "test_reset_5h": "Reset (5-jam)",
     "test_reset_7d": "Reset (7-hari)",
@@ -75,5 +76,6 @@
     "status_next_update": "Pembaruan berik.: {duration}",
     "status_refreshing": "Memperbarui...",
     "already_running": "Usage Monitor for Claude v{running_version} sudah berjalan.\n\nApakah Anda ingin mengganti instans yang sedang berjalan?",
-    "replace_failed": "Instans yang sedang berjalan tidak dapat digantikan.\n\nSilakan tutup secara manual lalu coba lagi."
+    "replace_failed": "Instans yang sedang berjalan tidak dapat digantikan.\n\nSilakan tutup secara manual lalu coba lagi.",
+    "settings_save_failed": "Tidak dapat menyimpan file pengaturan:\n{path}\n\n{error}"
 }

@@ -19,12 +19,16 @@ from usage_monitor_for_claude.app import (
 from usage_monitor_for_claude.cache import UpdateResult
 from usage_monitor_for_claude.claude_cli import RefreshResult
 from usage_monitor_for_claude.i18n import T
+from usage_monitor_for_claude.popup import _popup_data
+from usage_monitor_for_claude.settings_writer import SettingsWriteError
 
 _ACCOUNT_A = Account(Path('/claude/a'), 'a')
 _ACCOUNT_B = Account(Path('/claude/b'), 'b')
 
 
-def _make_shell(accounts: list[Account] | None = None, thresholds: list[float] | None = None) -> UsageMonitorForClaude:
+def _make_shell(
+    accounts: list[Account] | None = None, thresholds: list[float] | None = None, hidden: list[str] | None = None,
+) -> UsageMonitorForClaude:
     """Create a shell with mocked icons and configurable thresholds (default: one account).
 
     Parameters
@@ -33,14 +37,18 @@ def _make_shell(accounts: list[Account] | None = None, thresholds: list[float] |
         Accounts to monitor.  Defaults to a single ``_ACCOUNT_A``.
     thresholds : list[float] or None
         Alert thresholds to use for all variants.  Defaults to ``[80, 95]``.
+    hidden : list[str] or None
+        Labels in the ``hidden_accounts`` setting.  Defaults to none, whatever
+        the settings file of the machine running the suite says.
     """
     if thresholds is None:
         thresholds = [80, 95]
     with patch('usage_monitor_for_claude.app.pystray'), \
+         patch('usage_monitor_for_claude.app.HIDDEN_ACCOUNTS', hidden or []), \
          patch('usage_monitor_for_claude.app.create_icon_image'), \
          patch('usage_monitor_for_claude.app.taskbar_uses_light_theme', return_value=False):
         shell = UsageMonitorForClaude(accounts or [_ACCOUNT_A])
-    for monitor in shell.monitors:
+    for monitor in shell._all_monitors:
         monitor.icon = MagicMock()
     # Patches active for the shell's lifetime, stopped by _cleanup.  The presence
     # defaults keep _is_user_away() False so notification tests are deterministic
@@ -3933,6 +3941,606 @@ class TestPollStagger(unittest.TestCase):
             mock_time.sleep.assert_not_called()
         finally:
             _cleanup(app)
+
+
+# ---------------------------------------------------------------------------
+# Account visibility
+# ---------------------------------------------------------------------------
+
+_ACCOUNT_C = Account(Path('/claude/c'), 'c')
+_CODEX = Account(Path('/codex/home'), 'codex', PROVIDER_CODEX)
+_SETTINGS_FILE = Path('/settings/usage-monitor-settings.json')
+
+
+class TestHiddenAccounts(unittest.TestCase):
+    """A hidden account keeps its monitor and icon, but is invisible and paused."""
+
+    def _shell(self, accounts, hidden):
+        shell = _make_shell(accounts, hidden=hidden)
+        self.addCleanup(_cleanup, shell)
+        return shell
+
+    def test_every_account_gets_a_monitor_in_order(self):
+        shell = self._shell([_ACCOUNT_A, _ACCOUNT_B, _CODEX], ['b'])
+        self.assertEqual([monitor.account for monitor in shell._all_monitors], [_ACCOUNT_A, _ACCOUNT_B, _CODEX])
+        self.assertEqual([monitor.hidden for monitor in shell._all_monitors], [False, True, False])
+
+    def test_monitors_and_accounts_mean_the_visible_ones(self):
+        shell = self._shell([_ACCOUNT_A, _ACCOUNT_B, _CODEX], ['b'])
+        self.assertEqual([monitor.account for monitor in shell.monitors], [_ACCOUNT_A, _CODEX])
+        self.assertEqual(shell.accounts, [_ACCOUNT_A, _CODEX])
+
+    def test_monitors_follow_the_hidden_state_live(self):
+        shell = self._shell([_ACCOUNT_A, _ACCOUNT_B], [])
+        shell._all_monitors[1].set_hidden(True)
+        self.assertEqual(shell.accounts, [_ACCOUNT_A])
+        shell._all_monitors[1].set_hidden(False)
+        self.assertEqual(shell.accounts, [_ACCOUNT_A, _ACCOUNT_B])
+
+    def test_all_accounts_keeps_the_full_list_in_order(self):
+        shell = self._shell([_ACCOUNT_A, _ACCOUNT_B, _CODEX], ['b', 'codex'])
+        self.assertEqual(shell.all_accounts, [_ACCOUNT_A, _ACCOUNT_B, _CODEX])
+
+    def test_hidden_codex_gets_a_paused_monitor(self):
+        shell = self._shell([_ACCOUNT_A, _CODEX], ['codex'])
+        self.assertEqual([monitor.account for monitor in shell.monitors], [_ACCOUNT_A])
+        self.assertTrue(shell._all_monitors[1].hidden)
+
+    def test_unknown_labels_are_ignored(self):
+        shell = self._shell([_ACCOUNT_A, _ACCOUNT_B], ['gone', 'codex'])
+        self.assertEqual(shell.accounts, [_ACCOUNT_A, _ACCOUNT_B])
+
+    def test_hiding_every_account_is_ignored(self):
+        shell = self._shell([_ACCOUNT_A, _ACCOUNT_B], ['a', 'b'])
+        self.assertEqual(shell.accounts, [_ACCOUNT_A, _ACCOUNT_B])
+
+    def test_label_prefix_follows_the_visible_count(self):
+        shell = self._shell([_ACCOUNT_A, _ACCOUNT_B], ['b'])
+        self.assertEqual([monitor.label_prefix for monitor in shell._all_monitors], ['', ''])
+
+    def test_label_prefix_kept_while_several_stay_visible(self):
+        shell = self._shell([_ACCOUNT_A, _ACCOUNT_B, _ACCOUNT_C], ['c'])
+        self.assertEqual([monitor.label_prefix for monitor in shell.monitors], ['[a] ', '[b] '])
+
+    def test_poll_offsets_count_visible_monitors_only(self):
+        shell = self._shell([_ACCOUNT_A, _ACCOUNT_B, _ACCOUNT_C], ['a'])
+        self.assertEqual([monitor._poll_offset for monitor in shell.monitors], [0, POLL_STAGGER])
+
+    def test_a_monitor_that_starts_hidden_has_no_poll_offset(self):
+        shell = self._shell([_ACCOUNT_A, _ACCOUNT_B, _ACCOUNT_C], ['b'])
+        self.assertEqual([monitor._poll_offset for monitor in shell._all_monitors], [0, 0, POLL_STAGGER])
+
+    def test_run_starts_every_icon_hidden_ones_included(self):
+        shell = self._shell([_ACCOUNT_A, _ACCOUNT_B, _ACCOUNT_C], ['a', 'b'])
+        with patch('usage_monitor_for_claude.app.autostart_supported', return_value=False), \
+             patch('usage_monitor_for_claude.app.watch_theme_change'):
+            shell.run()
+        primary, *rest = shell._all_monitors
+        primary.icon.run.assert_called_once()
+        primary.icon.run_detached.assert_not_called()
+        for monitor in rest:
+            monitor.icon.run_detached.assert_called_once()
+            monitor.icon.run.assert_not_called()
+
+    def test_quit_stops_hidden_icons_too(self):
+        shell = self._shell([_ACCOUNT_A, _ACCOUNT_B, _ACCOUNT_C], ['b'])
+        shell.on_quit()
+        for monitor in shell._all_monitors:
+            monitor.icon.stop.assert_called_once()
+            self.assertFalse(monitor.running)
+
+    def test_theme_change_re_renders_hidden_icons_too(self):
+        shell = self._shell([_ACCOUNT_A, _ACCOUNT_B], ['b'])
+        for monitor in shell._all_monitors:
+            monitor._last_response = {'five_hour': {'utilization': 5, 'resets_at': None}}
+        with patch('usage_monitor_for_claude.app.taskbar_uses_light_theme', return_value=True), \
+             patch('usage_monitor_for_claude.app.create_icon_image') as create:
+            shell._on_theme_changed()
+        self.assertEqual(create.call_count, 2)
+
+    def test_popup_data_lists_visible_monitors_only(self):
+        shell = self._shell([_ACCOUNT_A, _ACCOUNT_B, _ACCOUNT_C], ['b'])
+        self.assertEqual([entry['label'] for entry in _popup_data(shell.monitors, installations=[])['accounts']], ['a', 'c'])
+        shell._all_monitors[1].set_hidden(False)
+        self.assertEqual([entry['label'] for entry in _popup_data(shell.monitors, installations=[])['accounts']], ['a', 'b', 'c'])
+
+
+class TestAccountsMenu(unittest.TestCase):
+    """The Accounts submenu of the tray menu."""
+
+    def _menu_item(self, accounts, hidden):
+        shell = _make_shell(accounts, hidden=hidden)
+        self.addCleanup(_cleanup, shell)
+        menu = shell.build_menu()
+        matches = [item for item in menu.items if item.text == T['menu_accounts']]
+        self.assertEqual(len(matches), 1)
+        return shell, matches[0]
+
+    def test_item_sits_after_autostart_before_test_commands(self):
+        shell = _make_shell([_ACCOUNT_A, _ACCOUNT_B])
+        self.addCleanup(_cleanup, shell)
+        with patch('usage_monitor_for_claude.app.autostart_supported', return_value=True), \
+             patch('usage_monitor_for_claude.app.ON_STARTUP_COMMAND', ['cmd']):
+            texts = [item.text for item in shell.build_menu().items]
+        self.assertEqual(texts.index(T['menu_accounts']), texts.index(T['autostart']) + 1)
+        self.assertEqual(texts.index(T['menu_accounts']), texts.index(T['test_commands']) - 1)
+
+    def test_one_checkable_item_per_account_in_order_with_raw_labels(self):
+        _shell, item = self._menu_item([_ACCOUNT_A, _ACCOUNT_B, _CODEX], [])
+        self.assertEqual([entry.text for entry in item.submenu.items], ['a', 'b', 'codex'])
+        self.assertEqual([entry.checked for entry in item.submenu.items], [True, True, True])
+
+    def test_hidden_accounts_are_unchecked(self):
+        _shell, item = self._menu_item([_ACCOUNT_A, _ACCOUNT_B, _CODEX], ['b', 'codex'])
+        self.assertEqual([entry.checked for entry in item.submenu.items], [True, False, False])
+
+    def test_all_hidden_guard_shows_every_account_checked(self):
+        _shell, item = self._menu_item([_ACCOUNT_A, _ACCOUNT_B], ['a', 'b'])
+        self.assertEqual([entry.checked for entry in item.submenu.items], [True, True])
+
+    def test_only_visible_account_is_disabled(self):
+        _shell, item = self._menu_item([_ACCOUNT_A, _ACCOUNT_B, _CODEX], ['b', 'codex'])
+        self.assertEqual([entry.enabled for entry in item.submenu.items], [False, True, True])
+
+    def test_every_item_enabled_while_several_are_visible(self):
+        _shell, item = self._menu_item([_ACCOUNT_A, _ACCOUNT_B, _CODEX], ['codex'])
+        self.assertEqual([entry.enabled for entry in item.submenu.items], [True, True, True])
+
+    def test_checked_is_read_when_the_menu_opens(self):
+        shell, item = self._menu_item([_ACCOUNT_A, _ACCOUNT_B, _CODEX], [])
+        shell._all_monitors[1].set_hidden(True)
+        self.assertEqual([entry.checked for entry in item.submenu.items], [True, False, True])
+        shell._all_monitors[1].set_hidden(False)
+        self.assertEqual([entry.checked for entry in item.submenu.items], [True, True, True])
+
+    def test_enabled_is_read_when_the_menu_opens(self):
+        shell, item = self._menu_item([_ACCOUNT_A, _ACCOUNT_B], [])
+        self.assertEqual([entry.enabled for entry in item.submenu.items], [True, True])
+        shell._all_monitors[1].set_hidden(True)
+        self.assertEqual([entry.enabled for entry in item.submenu.items], [False, True])
+
+    def test_every_icon_menu_follows_the_live_state(self):
+        shell = _make_shell([_ACCOUNT_A, _ACCOUNT_B])
+        self.addCleanup(_cleanup, shell)
+        menus = [shell.build_menu(), shell.build_menu()]
+        shell._all_monitors[0].set_hidden(True)
+        for menu in menus:
+            submenu = next(item for item in menu.items if item.text == T['menu_accounts']).submenu
+            self.assertEqual([entry.checked for entry in submenu.items], [False, True])
+
+    def test_submenu_visible_with_several_accounts(self):
+        _shell, item = self._menu_item([_ACCOUNT_A, _ACCOUNT_B], ['b'])
+        self.assertTrue(item.visible)
+
+    def test_submenu_hidden_with_a_single_account(self):
+        _shell, item = self._menu_item([_ACCOUNT_A], [])
+        self.assertFalse(item.visible)
+
+    def test_click_passes_the_clicked_label(self):
+        shell, item = self._menu_item([_ACCOUNT_A, _ACCOUNT_B], [])
+        with patch.object(shell, 'on_toggle_account') as toggle:
+            item.submenu.items[1](MagicMock())
+        toggle.assert_called_once_with('b')
+
+
+class TestToggleAccount(unittest.TestCase):
+    """A click saves the new list, then hides or shows the account live - no restart."""
+
+    def _shell(self, accounts, hidden):
+        shell = _make_shell(accounts, hidden=hidden)
+        self.addCleanup(_cleanup, shell)
+        for monitor in shell._all_monitors:
+            monitor._icon_ready = True
+        return shell
+
+    def _toggle(self, shell, label, path=_SETTINGS_FILE, save_side_effect=None):
+        with patch('usage_monitor_for_claude.app.SETTINGS_PATH', path), \
+             patch('usage_monitor_for_claude.app.save_hidden_accounts', side_effect=save_side_effect) as save, \
+             patch('usage_monitor_for_claude.app.show_warning_box') as warning, \
+             patch.object(shell, 'on_restart') as restart, \
+             patch.object(shell, 'on_quit') as quit_app:
+            shell.on_toggle_account(label)
+        return save, warning, restart, quit_app
+
+    def test_hiding_saves_the_label_and_hides_live(self):
+        shell = self._shell([_ACCOUNT_A, _ACCOUNT_B], [])
+        save, warning, _restart, _quit = self._toggle(shell, 'b')
+        save.assert_called_once_with(_SETTINGS_FILE, ['b'])
+        warning.assert_not_called()
+        self.assertEqual(shell.accounts, [_ACCOUNT_A])
+        self.assertFalse(shell._all_monitors[1].icon.visible)
+
+    def test_showing_removes_the_label_and_shows_live(self):
+        shell = self._shell([_ACCOUNT_A, _ACCOUNT_B], ['b'])
+        save, _warning, _restart, _quit = self._toggle(shell, 'b')
+        save.assert_called_once_with(_SETTINGS_FILE, [])
+        self.assertEqual(shell.accounts, [_ACCOUNT_A, _ACCOUNT_B])
+        self.assertTrue(shell._all_monitors[1].icon.visible)
+
+    def test_a_toggle_never_restarts_or_quits(self):
+        shell = self._shell([_ACCOUNT_A, _ACCOUNT_B], [])
+        _save, _warning, restart, quit_app = self._toggle(shell, 'b')
+        restart.assert_not_called()
+        quit_app.assert_not_called()
+        self.assertFalse(shell.restart_requested)
+        self.assertTrue(shell.running)
+
+    def test_icons_are_never_created_or_stopped(self):
+        shell = self._shell([_ACCOUNT_A, _ACCOUNT_B], [])
+        icons = [monitor.icon for monitor in shell._all_monitors]
+        self._toggle(shell, 'b')
+        self._toggle(shell, 'b')
+        self.assertEqual([monitor.icon for monitor in shell._all_monitors], icons)
+        for icon in icons:
+            icon.stop.assert_not_called()
+
+    def test_successive_clicks_use_the_live_state(self):
+        shell = self._shell([_ACCOUNT_A, _ACCOUNT_B, _ACCOUNT_C], [])
+        save, _warning, _restart, _quit = self._toggle(shell, 'b')
+        save.assert_called_once_with(_SETTINGS_FILE, ['b'])
+        save, _warning, _restart, _quit = self._toggle(shell, 'c')
+        save.assert_called_once_with(_SETTINGS_FILE, ['b', 'c'])
+        save, _warning, _restart, _quit = self._toggle(shell, 'b')
+        save.assert_called_once_with(_SETTINGS_FILE, ['c'])
+
+    def test_unknown_labels_stay_in_the_list(self):
+        shell = self._shell([_ACCOUNT_A, _ACCOUNT_B], ['codex'])
+        save, _warning, _restart, _quit = self._toggle(shell, 'b')
+        save.assert_called_once_with(_SETTINGS_FILE, ['codex', 'b'])
+
+    def test_showing_keeps_other_hidden_labels(self):
+        shell = self._shell([_ACCOUNT_A, _ACCOUNT_B, _ACCOUNT_C], ['b', 'c', 'gone'])
+        save, _warning, _restart, _quit = self._toggle(shell, 'b')
+        save.assert_called_once_with(_SETTINGS_FILE, ['c', 'gone'])
+
+    def test_all_hidden_guard_hides_only_the_clicked_account(self):
+        shell = self._shell([_ACCOUNT_A, _ACCOUNT_B], ['a', 'b', 'gone'])
+        save, _warning, _restart, _quit = self._toggle(shell, 'a')
+        save.assert_called_once_with(_SETTINGS_FILE, ['a', 'gone'])
+        self.assertEqual(shell.accounts, [_ACCOUNT_B])
+
+    def test_last_visible_account_cannot_be_hidden(self):
+        shell = self._shell([_ACCOUNT_A, _ACCOUNT_B], ['b'])
+        save, warning, _restart, _quit = self._toggle(shell, 'a')
+        save.assert_not_called()
+        warning.assert_not_called()
+        self.assertEqual(shell.accounts, [_ACCOUNT_A])
+        self.assertFalse(shell._all_monitors[0].hidden)
+
+    def test_unknown_label_in_a_click_is_ignored(self):
+        shell = self._shell([_ACCOUNT_A, _ACCOUNT_B], [])
+        save, warning, _restart, _quit = self._toggle(shell, 'gone')
+        save.assert_not_called()
+        warning.assert_not_called()
+
+    def test_without_a_loaded_file_the_default_path_is_created(self):
+        shell = self._shell([_ACCOUNT_A, _ACCOUNT_B], [])
+        default_path = Path('/home/.claude/usage-monitor-settings.json')
+        with patch('usage_monitor_for_claude.app.default_settings_path', return_value=default_path):
+            save, _warning, _restart, _quit = self._toggle(shell, 'b', path=None)
+        save.assert_called_once_with(default_path, ['b'])
+
+    def test_save_failure_shows_the_error_and_changes_nothing(self):
+        shell = self._shell([_ACCOUNT_A, _ACCOUNT_B], [])
+        monitor_b = shell._all_monitors[1]
+        monitor_b.icon.visible = True
+        _save, warning, restart, _quit = self._toggle(shell, 'b', save_side_effect=SettingsWriteError('disk full'))
+        restart.assert_not_called()
+        warning.assert_called_once()
+        message = warning.call_args.args[0]
+        self.assertIn('disk full', message)
+        self.assertIn(str(_SETTINGS_FILE), message)
+        self.assertFalse(monitor_b.hidden)
+        self.assertTrue(monitor_b.icon.visible)
+        self.assertEqual(shell.accounts, [_ACCOUNT_A, _ACCOUNT_B])
+        self.assertEqual([monitor.label_prefix for monitor in shell._all_monitors], ['[a] ', '[b] '])
+        for monitor in shell._all_monitors:
+            monitor.icon.update_menu.assert_not_called()
+
+    def test_failed_save_leaves_the_stored_list_for_the_next_click(self):
+        shell = self._shell([_ACCOUNT_A, _ACCOUNT_B], ['gone'])
+        self._toggle(shell, 'b', save_side_effect=SettingsWriteError('disk full'))
+        save, _warning, _restart, _quit = self._toggle(shell, 'b')
+        save.assert_called_once_with(_SETTINGS_FILE, ['gone', 'b'])
+
+    def test_every_icon_menu_is_updated_hidden_ones_too(self):
+        shell = self._shell([_ACCOUNT_A, _ACCOUNT_B, _ACCOUNT_C], ['c'])
+        self._toggle(shell, 'b')
+        for monitor in shell._all_monitors:
+            monitor.icon.update_menu.assert_called_once()
+
+    def test_an_icon_that_is_not_running_does_not_break_the_update(self):
+        shell = self._shell([_ACCOUNT_A, _ACCOUNT_B, _ACCOUNT_C], [])
+        shell._all_monitors[0].icon.update_menu.side_effect = RuntimeError('not running')
+        self._toggle(shell, 'c')
+        shell._all_monitors[1].icon.update_menu.assert_called_once()
+        shell._all_monitors[2].icon.update_menu.assert_called_once()
+        self.assertEqual(shell.accounts, [_ACCOUNT_A, _ACCOUNT_B])
+
+    def test_label_prefix_drops_when_the_visible_count_goes_from_two_to_one(self):
+        shell = self._shell([_ACCOUNT_A, _ACCOUNT_B], [])
+        self._toggle(shell, 'b')
+        self.assertEqual([monitor.label_prefix for monitor in shell._all_monitors], ['', ''])
+        self.assertEqual(shell._all_monitors[0].icon.title, T['loading'])
+
+    def test_label_prefix_returns_when_the_visible_count_goes_from_one_to_two(self):
+        shell = self._shell([_ACCOUNT_A, _ACCOUNT_B], ['b'])
+        self._toggle(shell, 'b')
+        self.assertEqual([monitor.label_prefix for monitor in shell._all_monitors], ['[a] ', '[b] '])
+        self.assertEqual(shell._all_monitors[0].icon.title, '[a] ' + T['loading'])
+        self.assertEqual(shell._all_monitors[1].icon.title, '[b] ' + T['loading'])
+
+    def test_label_prefix_kept_while_several_stay_visible(self):
+        shell = self._shell([_ACCOUNT_A, _ACCOUNT_B, _ACCOUNT_C], [])
+        self._toggle(shell, 'c')
+        self.assertEqual([monitor.label_prefix for monitor in shell._all_monitors], ['[a] ', '[b] ', '[c] '])
+
+    def test_tooltip_of_a_monitor_with_data_is_rendered_again(self):
+        shell = self._shell([_ACCOUNT_A, _ACCOUNT_B], [])
+        monitor_a, monitor_b = shell._all_monitors
+        monitor_a._last_response = {'five_hour': {'utilization': 5, 'resets_at': None}}
+        with patch.object(monitor_a, 'render_tray') as render_a, patch.object(monitor_b, 'render_tray') as render_b:
+            self._toggle(shell, 'b')
+        render_a.assert_called_once()
+        render_b.assert_not_called()
+
+    def test_hidden_monitors_are_not_rendered_on_a_toggle(self):
+        shell = self._shell([_ACCOUNT_A, _ACCOUNT_B, _ACCOUNT_C], ['c'])
+        shell._all_monitors[2]._last_response = {'five_hour': {'utilization': 5, 'resets_at': None}}
+        with patch.object(shell._all_monitors[2], 'render_tray') as render_c:
+            self._toggle(shell, 'b')
+        render_c.assert_not_called()
+
+
+class TestMonitorVisibility(unittest.TestCase):
+    """AccountMonitor.set_hidden(): icon visibility, baselines and the paused poll loop."""
+
+    def _monitor(self, hidden=False):
+        shell = _make_shell([_ACCOUNT_A, _ACCOUNT_B], hidden=['b'] if hidden else [])
+        self.addCleanup(_cleanup, shell)
+        monitor = shell._all_monitors[1]
+        monitor._poll_offset = 0.0
+        monitor.cache = MagicMock()
+        monitor.cache.last_success_time = 0.0
+        return monitor
+
+    def _stop_when_waiting(self, monitor, calls_before_stop=1, on_wait=None):
+        """Return a stub for the paused wait that ends the loop after *calls_before_stop* waits."""
+        calls = [0]
+
+        def wait(timeout=None):
+            calls[0] += 1
+            if on_wait is not None and calls[0] == 1:
+                on_wait()
+            if calls[0] >= calls_before_stop:
+                monitor.running = False
+            return False
+
+        return wait
+
+    def test_hiding_makes_a_ready_icon_invisible(self):
+        monitor = self._monitor()
+        monitor._icon_ready = True
+        monitor.icon.visible = True
+        monitor.set_hidden(True)
+        self.assertFalse(monitor.icon.visible)
+        self.assertTrue(monitor.hidden)
+
+    def test_showing_makes_a_ready_icon_visible(self):
+        monitor = self._monitor(hidden=True)
+        monitor._icon_ready = True
+        monitor.set_hidden(False)
+        self.assertTrue(monitor.icon.visible)
+        self.assertFalse(monitor.hidden)
+
+    def test_an_icon_that_is_not_ready_is_left_alone(self):
+        monitor = self._monitor(hidden=True)
+        monitor.icon.visible = 'untouched'
+        monitor.set_hidden(False)
+        self.assertEqual(monitor.icon.visible, 'untouched')
+        self.assertFalse(monitor.hidden)
+
+    def test_hiding_drops_deferred_notifications(self):
+        monitor = self._monitor()
+        monitor._deferred_notifications = {'reset': ('message', 'title')}
+        monitor.set_hidden(True)
+        self.assertEqual(monitor._deferred_notifications, {})
+
+    def test_showing_clears_the_usage_baseline_only(self):
+        monitor = self._monitor(hidden=True)
+        monitor._prev_utilization = {'five_hour': 99.0}
+        monitor._notified_thresholds = {'five_hour': 95}
+        monitor._prev_account_uuid = 'uuid-1'
+        monitor.set_hidden(False)
+        self.assertEqual(monitor._prev_utilization, {})
+        self.assertEqual(monitor._notified_thresholds, {'five_hour': 95})
+        self.assertEqual(monitor._prev_account_uuid, 'uuid-1')
+
+    def test_showing_wakes_the_poll_loop_and_drops_the_stagger(self):
+        monitor = self._monitor(hidden=True)
+        monitor._poll_offset = 60.0
+        monitor.set_hidden(False)
+        self.assertTrue(monitor._wake.is_set())
+        self.assertEqual(monitor._poll_offset, 0.0)
+
+    def test_setting_the_same_state_changes_nothing(self):
+        monitor = self._monitor()
+        monitor._icon_ready = True
+        monitor._prev_utilization = {'five_hour': 50.0}
+        generation = monitor._visibility_generation
+        monitor.set_hidden(False)
+        self.assertEqual(monitor._prev_utilization, {'five_hour': 50.0})
+        self.assertEqual(monitor._visibility_generation, generation)
+
+    def test_ready_hidden_icon_stays_invisible_and_polls_paused(self):
+        monitor = self._monitor(hidden=True)
+        monitor.icon.visible = 'untouched'
+        with patch.object(monitor, 'poll_loop') as poll, \
+             patch('usage_monitor_for_claude.app.api_headers', return_value=None):
+            monitor.on_icon_ready(monitor.icon)
+        self.assertIs(monitor.icon.visible, False)
+        poll.assert_called_once()
+
+    def test_ready_hidden_icon_shows_no_token_warning(self):
+        monitor = self._monitor(hidden=True)
+        with patch.object(monitor, 'poll_loop'), \
+             patch('usage_monitor_for_claude.app.api_headers', return_value=None):
+            monitor.on_icon_ready(monitor.icon)
+        monitor.icon.notify.assert_not_called()
+
+    def test_ready_visible_icon_becomes_visible_and_warns_without_token(self):
+        monitor = self._monitor()
+        with patch.object(monitor, 'poll_loop'), \
+             patch('usage_monitor_for_claude.app.api_headers', return_value=None):
+            monitor.on_icon_ready(monitor.icon)
+        self.assertIs(monitor.icon.visible, True)
+        monitor.icon.notify.assert_called_once()
+
+    def test_a_show_before_the_icon_is_ready_is_applied_when_it_is(self):
+        monitor = self._monitor(hidden=True)
+        monitor.set_hidden(False)
+        with patch.object(monitor, 'poll_loop'), \
+             patch('usage_monitor_for_claude.app.api_headers', return_value={'x': 'y'}):
+            monitor.on_icon_ready(monitor.icon)
+        self.assertIs(monitor.icon.visible, True)
+
+    def test_hidden_poll_loop_never_fetches(self):
+        monitor = self._monitor(hidden=True)
+        with patch.object(monitor._wake, 'wait', side_effect=self._stop_when_waiting(monitor, calls_before_stop=3)) as waiting, \
+             patch.object(monitor, 'update') as update:
+            monitor.poll_loop()
+        self.assertEqual(waiting.call_count, 3)
+        update.assert_not_called()
+        monitor.cache.update.assert_not_called()
+        monitor.cache.ensure_profile.assert_not_called()
+
+    def test_hidden_poll_loop_ends_on_quit(self):
+        monitor = self._monitor(hidden=True)
+        monitor.running = False
+        with patch.object(monitor._wake, 'wait') as waiting, patch.object(monitor, 'update') as update:
+            monitor.poll_loop()
+        waiting.assert_not_called()
+        update.assert_not_called()
+
+    def test_shown_poll_loop_polls_at_once_with_a_normal_update(self):
+        monitor = self._monitor(hidden=True)
+        force_values = []
+
+        def update(force=False):
+            force_values.append(force)
+            monitor.running = False
+
+        with patch.object(monitor._wake, 'wait', side_effect=self._stop_when_waiting(monitor, 5, lambda: monitor.set_hidden(False))), \
+             patch.object(monitor, 'update', side_effect=update):
+            monitor.poll_loop()
+        self.assertEqual(force_values, [False])
+        monitor.cache.ensure_profile.assert_called_once()
+
+    @patch('usage_monitor_for_claude.app.time.sleep')
+    def test_hide_during_the_wait_stops_fetching(self, _sleep):
+        monitor = self._monitor()
+        with patch.object(monitor, 'update') as update, \
+             patch.object(monitor, '_calculate_poll_interval', return_value=900), \
+             patch.object(monitor, '_polling_throttled', return_value=False), \
+             patch.object(monitor, '_seconds_until_next_reset', return_value=None), \
+             patch.object(monitor._wake, 'wait', side_effect=self._stop_when_waiting(monitor, calls_before_stop=3)), \
+             patch('usage_monitor_for_claude.app.time.sleep', side_effect=lambda _seconds: monitor.set_hidden(True)):
+            monitor.poll_loop()
+        self.assertEqual(update.call_count, 1)
+
+    @patch('usage_monitor_for_claude.app.time.sleep')
+    def test_hide_and_show_during_the_wait_polls_again_at_once(self, _sleep):
+        monitor = self._monitor()
+        force_values = []
+        sleeps = [0]
+
+        def update(force=False):
+            force_values.append(force)
+            if len(force_values) >= 2:
+                monitor.running = False
+
+        def sleep(_seconds):
+            sleeps[0] += 1
+            if sleeps[0] == 1:
+                monitor.set_hidden(True)
+                monitor.set_hidden(False)
+
+        with patch.object(monitor, 'update', side_effect=update), \
+             patch.object(monitor, '_calculate_poll_interval', return_value=900), \
+             patch.object(monitor, '_polling_throttled', return_value=False), \
+             patch.object(monitor, '_seconds_until_next_reset', return_value=None), \
+             patch('usage_monitor_for_claude.app.time.sleep', side_effect=sleep):
+            monitor.poll_loop()
+        self.assertEqual(force_values, [False, False])
+
+    @patch('usage_monitor_for_claude.app.time.sleep')
+    def test_a_pending_forced_refetch_is_dropped_when_the_account_is_hidden(self, _sleep):
+        monitor = self._monitor()
+        monitor.cache.last_success_time = 0.0
+        force_values = []
+
+        def update(force=False):
+            force_values.append(force)
+            if len(force_values) >= 2:
+                monitor.running = False
+
+        def account_switched():
+            monitor.set_hidden(True)
+            return True
+
+        with patch.object(monitor, 'update', side_effect=update), \
+             patch.object(monitor, '_calculate_poll_interval', return_value=900), \
+             patch.object(monitor, '_polling_throttled', return_value=False), \
+             patch.object(monitor, '_seconds_until_next_reset', return_value=None), \
+             patch.object(monitor, '_account_switched', side_effect=account_switched), \
+             patch.object(monitor._wake, 'wait', side_effect=self._stop_when_waiting(monitor, 5, lambda: monitor.set_hidden(False))), \
+             patch('usage_monitor_for_claude.app.read_access_token', side_effect=['tok-a', 'tok-b', 'tok-b', 'tok-b']):
+            monitor.poll_loop()
+        self.assertEqual(force_values, [False, False])
+
+    def test_poll_offset_wait_ends_when_hidden(self):
+        monitor = self._monitor(hidden=True)
+        monitor._poll_offset = 3600.0
+        with patch('usage_monitor_for_claude.app.time') as mock_time:
+            mock_time.time.return_value = 100.0
+            monitor._wait_poll_offset()
+        mock_time.sleep.assert_not_called()
+
+    def test_result_of_a_fetch_in_flight_while_hiding_is_dropped(self):
+        monitor = self._monitor(hidden=True)
+        monitor.cache.update.return_value = UpdateResult(data={'five_hour': {'utilization': 99, 'resets_at': None}})
+        monitor._prev_utilization = {}
+        with patch.object(monitor, 'render_tray') as render, patch.object(monitor, '_notify_or_defer') as notify:
+            monitor.update()
+        render.assert_not_called()
+        notify.assert_not_called()
+        self.assertEqual(monitor._last_response, {})
+        self.assertEqual(monitor._prev_utilization, {})
+
+    def test_reset_while_hidden_raises_no_late_reset_toast_or_command(self):
+        monitor = self._monitor()
+        monitor._prev_account_uuid = None
+        monitor._prev_utilization = {'five_hour': 99.0}
+        monitor.set_hidden(True)
+        monitor.set_hidden(False)
+        monitor.cache.update.return_value = UpdateResult(data={'five_hour': {'utilization': 0, 'resets_at': None}})
+        monitor.cache.profile = {}
+        with patch('usage_monitor_for_claude.app.ON_RESET_COMMAND', ['cmd']), \
+             patch('usage_monitor_for_claude.app.read_access_token', return_value=None), \
+             patch('usage_monitor_for_claude.app.run_event_command') as run, \
+             patch.object(monitor, '_notify_or_defer') as notify:
+            monitor.update()
+        run.assert_not_called()
+        notify.assert_not_called()
+
+
+class TestAccountVisibilityLocale(unittest.TestCase):
+    """The new menu and error texts exist for the active language."""
+
+    def test_keys_present(self):
+        self.assertIn('menu_accounts', T)
+        self.assertIn('{path}', T['settings_save_failed'])
+        self.assertIn('{error}', T['settings_save_failed'])
 
 
 if __name__ == '__main__':
