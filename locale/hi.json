@@ -14,6 +14,7 @@
     "autostart": "लॉगिन पर शुरू करें",
     "restart": "पुनः आरंभ करें",
     "menu_project": "GitHub पर प्रोजेक्ट",
+    "menu_accounts": "खाते",
     "test_commands": "इवेंट कमांड परीक्षण",
     "test_reset_5h": "रीसेट (5-घंटा)",
     "test_reset_7d": "रीसेट (7-दिन)",
@@ -75,5 +76,6 @@
     "status_next_update": "अगला अपडेट {duration} में",
     "status_refreshing": "रीफ़्रेश हो रहा है...",
     "already_running": "Usage Monitor for Claude v{running_version} पहले से चल रहा है।\n\nक्या आप चल रही प्रति को बदलना चाहते हैं?",
-    "replace_failed": "चल रही प्रति को बदला नहीं जा सका।\n\nकृपया उसे मैन्युअल रूप से बंद करें और फिर से प्रयास करें।"
+    "replace_failed": "चल रही प्रति को बदला नहीं जा सका।\n\nकृपया उसे मैन्युअल रूप से बंद करें और फिर से प्रयास करें।",
+    "settings_save_failed": "सेटिंग फ़ाइल सहेजी नहीं जा सकी:\n{path}\n\n{error}"
 }

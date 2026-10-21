@@ -14,6 +14,7 @@
     "autostart": "Iniciar al iniciar sesión",
     "restart": "Reiniciar",
     "menu_project": "Proyecto en GitHub",
+    "menu_accounts": "Cuentas",
     "test_commands": "Probar comandos de eventos",
     "test_reset_5h": "Reset (5 horas)",
     "test_reset_7d": "Reset (7 dias)",
@@ -75,5 +76,6 @@
     "status_next_update": "Próx. actualiz.: {duration}",
     "status_refreshing": "Actualizando...",
     "already_running": "Usage Monitor for Claude v{running_version} ya se está ejecutando.\n\n¿Desea reemplazar la instancia en ejecución?",
-    "replace_failed": "No se pudo reemplazar la instancia en ejecución.\n\nCiérrela manualmente e inténtelo de nuevo."
+    "replace_failed": "No se pudo reemplazar la instancia en ejecución.\n\nCiérrela manualmente e inténtelo de nuevo.",
+    "settings_save_failed": "No se pudo guardar el archivo de configuración:\n{path}\n\n{error}"
 }

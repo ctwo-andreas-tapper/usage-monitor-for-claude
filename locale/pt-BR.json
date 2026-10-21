@@ -14,6 +14,7 @@
     "autostart": "Iniciar ao fazer login",
     "restart": "Reiniciar",
     "menu_project": "Projeto no GitHub",
+    "menu_accounts": "Contas",
     "test_commands": "Testar comandos de eventos",
     "test_reset_5h": "Reset (5 horas)",
     "test_reset_7d": "Reset (7 dias)",
@@ -75,5 +76,6 @@
     "status_next_update": "Próx. atualiz.: {duration}",
     "status_refreshing": "Atualizando...",
     "already_running": "Usage Monitor for Claude v{running_version} já está em execução.\n\nDeseja substituir a instância em execução?",
-    "replace_failed": "Não foi possível substituir a instância em execução.\n\nFeche-a manualmente e tente novamente."
+    "replace_failed": "Não foi possível substituir a instância em execução.\n\nFeche-a manualmente e tente novamente.",
+    "settings_save_failed": "Não foi possível salvar o arquivo de configurações:\n{path}\n\n{error}"
 }

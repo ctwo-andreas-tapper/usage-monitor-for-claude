@@ -62,8 +62,9 @@ if _verbose:
         datefmt='%H:%M:%S',
     )
 
-# The Codex account joins the monitored set only here: it never enters --config-dir,
+# The Codex account joins the account list only here: it never enters --config-dir,
 # launch_suffix() or the autostart entry, which name Claude directories alone.
+# The shell starts it hidden when the user hid it from the tray menu.
 _codex_account = detect_codex_account(_accounts)
 if _codex_account is not None:
     _accounts.append(_codex_account)

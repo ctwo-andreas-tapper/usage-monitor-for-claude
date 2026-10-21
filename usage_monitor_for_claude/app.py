@@ -23,15 +23,18 @@ from .claude_cli import PROJECT_URL
 from .command import run_event_command
 from .platforms import (
     autostart_supported, get_idle_seconds, install_tray_click_handler, is_autostart_enabled,
-    is_screensaver_running, is_workstation_locked, set_autostart, show_error_box, sync_autostart_path,
+    is_screensaver_running, is_workstation_locked, set_autostart, show_error_box, show_warning_box, sync_autostart_path,
     taskbar_uses_light_theme, watch_theme_change,
 )
 from .settings import (
-    ALERT_EXTRA_USAGE_SPENT, ALERT_TIME_AWARE, ALERT_TIME_AWARE_BELOW, ICON_FIELDS, IDLE_INTERVAL, IDLE_PAUSE,
+    ALERT_EXTRA_USAGE_SPENT, ALERT_TIME_AWARE, ALERT_TIME_AWARE_BELOW, HIDDEN_ACCOUNTS, ICON_FIELDS, IDLE_INTERVAL, IDLE_PAUSE,
     NOTIFY_CLAUDE_UPDATE, ON_RESET_COMMAND, ON_STARTUP_COMMAND, ON_THRESHOLD_COMMAND, POLL_ERROR, POLL_FAST,
-    POLL_FAST_EXTRA, POLL_INTERVAL, POLL_STAGGER, QUICK_ACTION_COMMAND, get_alert_thresholds,
+    POLL_FAST_EXTRA, POLL_INTERVAL, POLL_STAGGER, QUICK_ACTION_COMMAND, SETTINGS_PATH, get_alert_thresholds,
 )
-from .formatting import elapsed_pct, field_period, format_credits, format_tooltip, is_active_quota, parse_field_name, popup_label
+from .settings_writer import SettingsWriteError, default_settings_path, save_account_visibility
+from .formatting import (
+    elapsed_pct, expand_popup_fields, field_period, format_credits, format_tooltip, is_active_quota, parse_field_name, popup_label,
+)
 from .i18n import T
 from .popup import UsagePopup
 from .tray_icon import create_icon_image, create_status_image
@@ -46,6 +49,45 @@ RESET_BUFFER = 5
 def _future_iso(**kwargs: float) -> str:
     """Return an ISO 8601 timestamp offset from now by the given timedelta kwargs."""
     return (datetime.now(timezone.utc) + timedelta(**kwargs)).isoformat()
+
+
+def _icon_slots(data: dict[str, Any]) -> list[tuple[str | None, str]]:
+    """Return the ``(field, mode)`` shown in the tray icon's top and bottom slot.
+
+    The configured ``icon_fields`` win.  A configured field the account does
+    not report (a plan without a 5-hour window, for example) gives up its
+    slot: the configured fields that are reported move up in their order,
+    and the account's other active quota fields fill what is left, shortest
+    window first.  A slot nothing can fill is ``(None, 'utilization')``.
+
+    Parameters
+    ----------
+    data : dict
+        A successful usage response.
+    """
+    configured = [tuple(field.split(':', 1)) if ':' in field else (field, 'utilization') for field in ICON_FIELDS[:2]]
+    reported = [(field, mode) for field, mode in configured if _reports_utilization(data.get(field))]
+    if len(reported) == len(configured):
+        return configured
+
+    slots: list[tuple[str | None, str]] = list(reported)
+    shown = {field for field, _ in reported}
+    for field in expand_popup_fields(['*'], data):
+        if len(slots) == len(configured):
+            break
+        if field not in shown:
+            slots.append((field, 'utilization'))
+            shown.add(field)
+
+    while len(slots) < len(configured):
+        slots.append((None, 'utilization'))
+
+    return slots
+
+
+def _reports_utilization(entry: Any) -> bool:
+    """Return True if *entry* is a quota block with a utilization value."""
+    return isinstance(entry, dict) and entry.get('utilization') is not None
 
 
 def _align_to_reset(interval: int, next_reset: float | None) -> tuple[int, bool]:
@@ -102,7 +144,7 @@ class AccountMonitor:
     """Tray icon, cache and poll loop for one Claude account."""
 
     def __init__(self, account: Account, shell: UsageMonitorForClaude, *, show_label: bool,
-                 poll_offset: float = 0.0) -> None:
+                 poll_offset: float = 0.0, hidden: bool = False) -> None:
         """Set up the account's tray icon, cache and polling state.
 
         Parameters
@@ -117,10 +159,22 @@ class AccountMonitor:
         poll_offset : float
             Seconds to delay this account's first poll, spreading the
             cold-start burst so the accounts do not all fetch at once.
+        hidden : bool
+            When True, the icon stays invisible and the poll loop stays
+            paused until ``set_hidden(False)``.
         """
         self.account = account
         self.shell = shell
         self.running = True
+
+        # Visibility.  The lock serialises set_hidden() against on_icon_ready();
+        # the generation counter lets the poll loop notice a hide or show that
+        # happened while it was waiting; _wake ends the paused wait early.
+        self._visibility_lock = threading.Lock()
+        self._hidden = hidden
+        self._visibility_generation = 0
+        self._icon_ready = False
+        self._wake = threading.Event()
         self.cache = UsageCache(account)
         self._poll_offset = poll_offset
         self.label_prefix = f'[{account.label}] ' if show_label else ''
@@ -157,6 +211,51 @@ class AccountMonitor:
         self.double_click_installed = False
         if QUICK_ACTION_COMMAND:
             self.double_click_installed = install_tray_click_handler(self.icon, shell.on_show_popup, shell._run_quick_action)
+
+    # Visibility
+
+    @property
+    def hidden(self) -> bool:
+        """Whether the account is hidden: icon invisible and poll loop paused."""
+        return self._hidden
+
+    def set_hidden(self, hidden: bool) -> None:
+        """Hide or show this account without creating or destroying its icon.
+
+        Hiding drops the deferred notifications and pauses the poll loop.
+        Showing clears the usage baseline that compares across polls, so a
+        reset that happened while hidden raises no late toast or reset
+        command, and wakes the poll loop for an ordinary poll (the cooldown
+        and the rate-limit backoff still apply).
+
+        Parameters
+        ----------
+        hidden : bool
+            True to hide the account, False to show it.
+        """
+        with self._visibility_lock:
+            if hidden == self._hidden:
+                return
+
+            self._hidden = hidden
+            self._visibility_generation += 1
+            self._next_poll_time = None
+            if hidden:
+                with self._notify_lock:
+                    self._deferred_notifications = {}
+            else:
+                self._prev_utilization = {}
+                self._poll_offset = 0.0
+            if self._icon_ready:
+                self.icon.visible = not hidden
+            self._wake.set()
+
+    def refresh_title(self) -> None:
+        """Re-render the tooltip, so a changed label prefix shows at once."""
+        if self._last_response:
+            self.render_tray()
+        else:
+            self.icon.title = self.label_prefix + T['loading']
 
     # Account identity
 
@@ -198,20 +297,19 @@ class AccountMonitor:
         if 'error' in data:
             self.icon.icon = create_status_image('C!' if data.get('auth_error') else '!', self.shell._light_taskbar)
         else:
-            top_field, top_mode = ICON_FIELDS[0].split(':', 1) if ':' in ICON_FIELDS[0] else (ICON_FIELDS[0], 'utilization')
-            bottom_field, bottom_mode = ICON_FIELDS[1].split(':', 1) if ':' in ICON_FIELDS[1] else (ICON_FIELDS[1], 'utilization')
+            (top_field, top_mode), (bottom_field, bottom_mode) = _icon_slots(data)
             # isinstance instead of truthiness: a configured field may point at
             # a non-dict response value (e.g. the raw limits array).
-            top_entry = data.get(top_field)
-            bottom_entry = data.get(bottom_field)
+            top_entry = data.get(top_field) if top_field else None
+            bottom_entry = data.get(bottom_field) if bottom_field else None
             if not isinstance(top_entry, dict):
                 top_entry = {}
             if not isinstance(bottom_entry, dict):
                 bottom_entry = {}
             pct_top = top_entry.get('utilization', 0) or 0
             pct_bottom = bottom_entry.get('utilization', 0) or 0
-            top_period = field_period(top_field)
-            bottom_period = field_period(bottom_field)
+            top_period = field_period(top_field) if top_field else None
+            bottom_period = field_period(bottom_field) if bottom_field else None
             time_pct_top = elapsed_pct(top_entry.get('resets_at', ''), top_period) if top_period else None
             time_pct_bottom = elapsed_pct(bottom_entry.get('resets_at', ''), bottom_period) if bottom_period else None
             extra = data.get('extra_usage') or {}
@@ -241,8 +339,14 @@ class AccountMonitor:
             confirmed account switch, where the freshly selected account
             has no polling history that those throttles need to protect.
         """
+        if self._hidden:
+            return
+
+        visibility_seen = self._visibility_generation
         result = self.cache.update(force=force)
-        if result.data is None:
+        # A hide that landed while the request was in flight: the account is
+        # paused, so the result raises no toast, command or baseline change.
+        if result.data is None or self._hidden:
             return
 
         self._last_response = result.data
@@ -272,6 +376,10 @@ class AccountMonitor:
         # When the user runs 'claude auth login', the token changes and the next profile fetch
         # returns a different account UUID, preventing a false quota-reset notification.
         self.cache.ensure_profile()
+        # ensure_profile() can block on a request; a hide (or hide and show)
+        # during it must not let this result run commands or move baselines.
+        if self._hidden or self._visibility_generation != visibility_seen:
+            return
         current_profile = self.cache.profile
         current_account_uuid = (current_profile.get('account') or {}).get('uuid') if isinstance(current_profile, dict) else None
 
@@ -775,10 +883,10 @@ class AccountMonitor:
         Staggers the accounts' cold-start fetches so they do not all hit
         the API at once; the shared rate-limit backoff then holds the rest
         back if an earlier account is already throttled.  The wait yields
-        immediately to a quit request.
+        immediately to a quit request or a hide.
         """
         deadline = time.time() + self._poll_offset
-        while self.running:
+        while self.running and not self._hidden:
             remaining = deadline - time.time()
             if remaining <= 0:
                 return
@@ -791,11 +899,30 @@ class AccountMonitor:
         polling never stops: quota resets stay aligned and the account-switch
         watcher keeps running on an unattended machine.  Coming back - or
         opening the popup - pulls the next poll back to the normal cadence.
+
+        A hidden account fetches nothing: the loop only waits, and polls at
+        once when the account is shown again.
         """
-        self._wait_poll_offset()
-        self.cache.ensure_profile()
+        profile_loaded = False
         force_next = False
         while self.running:
+            if self._hidden:
+                force_next = False
+                self._wake.wait(1.0)
+                self._wake.clear()
+                continue
+
+            if not profile_loaded:
+                self._wait_poll_offset()
+                if self._hidden or not self.running:
+                    continue
+                self.cache.ensure_profile()
+                profile_loaded = True
+                # The profile request can block; a hide during it pauses before any usage request.
+                if self._hidden or not self.running:
+                    continue
+
+            visibility_seen = self._visibility_generation
             # Read before the update, not after: an account switch that lands while the
             # request is in flight would otherwise already be part of the token read
             # afterwards and never register as a change - leaving the previous account's
@@ -811,6 +938,10 @@ class AccountMonitor:
             throttled_seen = self._polling_throttled()
             while self.running and time.time() < target:
                 time.sleep(1)
+
+                # Hidden or shown while waiting: the outer loop pauses, or polls at once.
+                if self._visibility_generation != visibility_seen:
+                    break
 
                 # React to a credentials token change between polls. A switch to
                 # a different account forces an immediate refresh (bypassing the
@@ -875,16 +1006,34 @@ class AccountMonitor:
             if not self.shell.running:
                 icon.stop()
                 return
-            icon.visible = True
-            if self.account.provider == PROVIDER_CLAUDE and not api_headers(self.account):
+            with self._visibility_lock:
+                self._icon_ready = True
+                icon.visible = not self._hidden
+            if not self._hidden and self.account.provider == PROVIDER_CLAUDE and not api_headers(self.account):
                 icon.notify(f"{T['warn_no_token']}\n{T['warn_login']}", self.label_prefix + T['popup_title'])
             self.poll_loop()
         except Exception:
             crash_log(traceback.format_exc())
 
 
+def _visible_accounts(accounts: list[Account], hidden_labels: list[str]) -> list[Account]:
+    """Return the accounts to monitor: all but the hidden ones, or all when that would leave none.
+
+    Labels without a matching account are ignored.
+    """
+    visible = [account for account in accounts if account.label not in hidden_labels]
+
+    return visible or list(accounts)
+
+
 class UsageMonitorForClaude:
-    """System tray application: one icon per account, one shared popup."""
+    """System tray application: one icon per account, one shared popup.
+
+    Every account owns an icon for the whole run, hidden ones included: the
+    first icon runs the main loop, so icons are never created or destroyed
+    after start.  Hiding an account makes its icon invisible and pauses its
+    poll loop.
+    """
 
     def __init__(self, accounts: list[Account]) -> None:
         """Set up one AccountMonitor per account plus the shared popup state.
@@ -892,10 +1041,16 @@ class UsageMonitorForClaude:
         Parameters
         ----------
         accounts : list[Account]
-            The Claude accounts to monitor, in launch order.  At least one
-            account is required.
+            Every known account, in launch order.  At least one account is
+            required.  Those named in the ``hidden_accounts`` setting start
+            hidden, unless that would hide all of them.
         """
         assert accounts, 'at least one account is required'
+        self.all_accounts = list(accounts)
+        self._hidden_labels = list(HIDDEN_ACCOUNTS)
+        visible_accounts = _visible_accounts(self.all_accounts, self._hidden_labels)
+        visible_labels = {account.label for account in visible_accounts}
+        self._visibility_lock = threading.Lock()
         self.running = True
         self.restart_requested = False
 
@@ -912,11 +1067,16 @@ class UsageMonitorForClaude:
         self.double_click_installed = False
         # Each account keeps its own 429 backoff (the usage limit is per
         # account); the stagger just spreads their first polls apart.
-        self.monitors = [
-            AccountMonitor(account, self, show_label=len(accounts) > 1, poll_offset=index * POLL_STAGGER)
-            for index, account in enumerate(accounts)
-        ]
-        self.double_click_installed = all(monitor.double_click_installed for monitor in self.monitors)
+        self._all_monitors: list[AccountMonitor] = []
+        visible_count = 0
+        for account in self.all_accounts:
+            hidden = account.label not in visible_labels
+            poll_offset = 0.0 if hidden else visible_count * POLL_STAGGER
+            visible_count += 0 if hidden else 1
+            self._all_monitors.append(
+                AccountMonitor(account, self, show_label=len(visible_accounts) > 1, poll_offset=poll_offset, hidden=hidden),
+            )
+        self.double_click_installed = all(monitor.double_click_installed for monitor in self._all_monitors)
         if QUICK_ACTION_COMMAND and not self.double_click_installed:
             # Printed rather than shown: not worth a dialog on every start,
             # and the command is still reachable from the menu entry that
@@ -926,7 +1086,13 @@ class UsageMonitorForClaude:
                   'Use the tray menu entry instead.')
 
     @property
+    def monitors(self) -> list[AccountMonitor]:
+        """The monitors of the visible accounts; the list changes when an account is hidden or shown."""
+        return [monitor for monitor in self._all_monitors if not monitor.hidden]
+
+    @property
     def accounts(self) -> list[Account]:
+        """The visible accounts; ``all_accounts`` also holds the hidden ones."""
         return [monitor.account for monitor in self.monitors]
 
     @property
@@ -947,6 +1113,10 @@ class UsageMonitorForClaude:
                 checked=lambda item: is_autostart_enabled(),
                 visible=autostart_supported(),
             ),
+            pystray.MenuItem(
+                T['menu_accounts'], pystray.Menu(*self._account_menu_items()),
+                visible=len(self.all_accounts) > 1,
+            ),
             pystray.MenuItem(T['test_commands'], pystray.Menu(
                 pystray.MenuItem(T['test_reset_5h'], self.on_test_reset_5h, enabled=bool(ON_RESET_COMMAND)),
                 pystray.MenuItem(T['test_reset_7d'], self.on_test_reset_7d, enabled=bool(ON_RESET_COMMAND)),
@@ -962,6 +1132,46 @@ class UsageMonitorForClaude:
             pystray.MenuItem(T['quit'], self.on_quit),
         )
 
+    def _account_menu_items(self) -> list[pystray.MenuItem]:
+        """Return one checkable item per account; the last visible account cannot be unchecked.
+
+        The state is read when the menu opens, so one menu stays correct
+        while accounts are hidden and shown.
+        """
+        items = []
+        for account in self.all_accounts:
+            items.append(pystray.MenuItem(
+                account.label, self._account_toggle_action(account.label),
+                checked=self._account_checked(account.label),
+                enabled=self._account_enabled(account.label),
+            ))
+
+        return items
+
+    def _is_account_visible(self, label: str) -> bool:
+        return any(monitor.account.label == label and not monitor.hidden for monitor in self._all_monitors)
+
+    def _account_checked(self, label: str) -> Any:
+        """Return the menu predicate that tells whether the account *label* is visible."""
+        def checked(item: Any = None) -> bool:
+            return self._is_account_visible(label)
+
+        return checked
+
+    def _account_enabled(self, label: str) -> Any:
+        """Return the menu predicate that tells whether the account *label* can be clicked."""
+        def enabled(item: Any = None) -> bool:
+            return not (self._is_account_visible(label) and len(self.monitors) == 1)
+
+        return enabled
+
+    def _account_toggle_action(self, label: str) -> Any:
+        """Return the menu action that shows or hides the account named *label*."""
+        def toggle(icon: Any = None, item: Any = None) -> None:
+            self.on_toggle_account(label)
+
+        return toggle
+
     # Menu actions
 
     def on_show_popup(self, icon: Any = None, item: Any = None) -> None:
@@ -975,6 +1185,67 @@ class UsageMonitorForClaude:
 
     def on_toggle_autostart(self, icon: Any = None, item: Any = None) -> None:
         set_autostart(not is_autostart_enabled())
+
+    def on_toggle_account(self, label: str) -> None:
+        """Hide the visible account *label*, or show the hidden one, at once.
+
+        The new list goes to the settings file first.  When that fails, the
+        error is shown and nothing changes.  On success the account's icon
+        and poll loop switch live, the label prefixes follow the new visible
+        count and every menu is rebuilt.  Only this launch's accounts change
+        in the stored list: the writer reads the file again, so labels that
+        another launch (or a hand edit) put there stay.
+
+        Parameters
+        ----------
+        label : str
+            Label of the account to toggle.
+        """
+        path = SETTINGS_PATH or default_settings_path()
+        save_error = None
+        with self._visibility_lock:
+            monitor = next((candidate for candidate in self._all_monitors if candidate.account.label == label), None)
+            if monitor is None:
+                return
+
+            hide = not monitor.hidden
+            if hide and len(self.monitors) == 1:
+                return
+
+            hidden_names = {candidate.account.label for candidate in self._all_monitors if candidate.hidden}
+            hidden_names = hidden_names | {label} if hide else hidden_names - {label}
+            known_labels = [account.label for account in self.all_accounts]
+            hidden_labels = [name for name in known_labels if name in hidden_names]
+            try:
+                save_account_visibility(path, known_labels, hidden_labels)
+            except SettingsWriteError as exc:
+                save_error = exc
+            else:
+                self._apply_visibility(monitor, hide)
+
+        if save_error is not None:
+            show_warning_box(T['settings_save_failed'].format(path=path, error=save_error), T['popup_title'])
+
+    def _apply_visibility(self, monitor: AccountMonitor, hide: bool) -> None:
+        """Hide or show *monitor*, then bring labels and menus in line with the new visible set."""
+        show_label = len(self.monitors) + (-1 if hide else 1) > 1
+        for candidate in self._all_monitors:
+            candidate.label_prefix = f'[{candidate.account.label}] ' if show_label else ''
+        for candidate in self._all_monitors:
+            visible_after = not hide if candidate is monitor else not candidate.hidden
+            if visible_after:
+                candidate.refresh_title()
+
+        monitor.set_hidden(hide)
+        self._update_menus()
+
+    def _update_menus(self) -> None:
+        """Rebuild the native menu of every icon, so the Accounts checkmarks match the new state."""
+        for monitor in self._all_monitors:
+            try:
+                monitor.icon.update_menu()
+            except Exception:  # an icon that is not running has no menu to rebuild
+                continue
 
     def on_restart(self, icon: Any = None, item: Any = None) -> None:
         self.restart_requested = True
@@ -1096,8 +1367,9 @@ class UsageMonitorForClaude:
 
     def on_quit(self, icon: Any = None, item: Any = None) -> None:
         self.running = False
-        for monitor in self.monitors:
+        for monitor in self._all_monitors:
             monitor.running = False
+            monitor._wake.set()
             monitor.icon.stop()
 
     # Popup
@@ -1131,20 +1403,20 @@ class UsageMonitorForClaude:
     # Theme
 
     def _on_theme_changed(self) -> None:
-        """Re-render every tray icon when the Windows theme changes."""
+        """Re-render every tray icon, hidden ones included, when the Windows theme changes."""
         light = taskbar_uses_light_theme()
         if light == self._light_taskbar:
             return
 
         self._light_taskbar = light
-        for monitor in self.monitors:
+        for monitor in self._all_monitors:
             if monitor._last_response:
                 monitor.render_tray()
 
     # Lifecycle
 
     def run(self) -> None:
-        """Start every tray icon and block on the primary until quit.
+        """Start every tray icon, hidden ones included, and block on the primary until quit.
 
         The first monitor's icon runs on this (the calling) thread via
         ``icon.run()``; every other icon runs detached.  On GTK only a
@@ -1159,7 +1431,7 @@ class UsageMonitorForClaude:
         if autostart_supported():
             sync_autostart_path()
         threading.Thread(target=watch_theme_change, args=(self._on_theme_changed,), daemon=True).start()
-        primary, *rest = self.monitors
+        primary, *rest = self._all_monitors
         for monitor in rest:
             monitor.icon.run_detached(setup=monitor.on_icon_ready)
         primary.icon.run(setup=primary.on_icon_ready)

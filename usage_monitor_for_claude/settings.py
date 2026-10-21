@@ -11,7 +11,9 @@ any constant.  One file serves every monitored account.  Search order:
 1. Next to the executable (frozen) or project root (source)
 2. ``~/.claude/usage-monitor-settings.json``
 
-The app never creates this file - users place it manually.
+The app writes this file only when the user hides or shows an account in the
+tray menu, and then only the ``hidden_accounts`` key (see ``settings_writer``).
+Otherwise users place and edit it manually.
 """
 from __future__ import annotations
 
@@ -26,12 +28,12 @@ __all__ = [
     'ALERT_EXTRA_USAGE_SPENT', 'ALERT_TIME_AWARE', 'ALERT_TIME_AWARE_BELOW',
     'BAR_BG', 'BAR_DIVIDER', 'BAR_FG', 'BAR_FG_WARN', 'BAR_MARKER', 'BG',
     'CLI_COMMAND', 'COMPACT_HIDE', 'CURRENCY_SYMBOL',
-    'FG', 'FG_DIM', 'FG_HEADING', 'FG_LINK',
+    'FG', 'FG_DIM', 'FG_HEADING', 'FG_LINK', 'HIDDEN_ACCOUNTS',
     'ICON_DARK', 'ICON_FIELDS', 'ICON_LIGHT', 'ICON_STYLE', 'IDLE_INTERVAL', 'IDLE_PAUSE',
     'LANGUAGE', 'MAX_BACKOFF', 'MONITOR_CODEX', 'NOTIFY_CLAUDE_UPDATE',
     'ON_RESET_COMMAND', 'ON_STARTUP_COMMAND', 'ON_THRESHOLD_COMMAND', 'QUICK_ACTION_COMMAND',
     'POLL_ERROR', 'POLL_FAST', 'POLL_FAST_EXTRA', 'POLL_INTERVAL', 'POLL_STAGGER',
-    'POPUP_FIELDS', 'SETTINGS_FILENAME', 'TIME_FORMAT', 'TOOLTIP_FIELDS',
+    'POPUP_FIELDS', 'SETTINGS_FILENAME', 'SETTINGS_PATH', 'TIME_FORMAT', 'TOOLTIP_FIELDS',
     'get_alert_thresholds',
 ]
 
@@ -58,7 +60,7 @@ _COMMAND_KEYS = frozenset({
     'quick_action_command', 'on_double_click_command', 'on_reset_command', 'on_startup_command', 'on_threshold_command',
 })
 _BOOL_KEYS = frozenset({'alert_time_aware', 'monitor_codex', 'notify_claude_update'})
-_STRING_LIST_KEYS = frozenset({'tooltip_fields', 'compact_hide'})
+_STRING_LIST_KEYS = frozenset({'tooltip_fields', 'compact_hide', 'hidden_accounts'})
 _WILDCARD_STRING_LIST_KEYS = frozenset({'popup_fields'})
 _VALID_BAR_MODES = frozenset({'utilization', 'overage'})
 
@@ -78,8 +80,8 @@ def _quick_action_command(settings: dict) -> list[str]:
     return settings.get('on_double_click_command', [])
 
 
-def _load_settings() -> dict:
-    """Read the first ``usage-monitor-settings.json`` found, or return ``{}``."""
+def _find_settings_file() -> Path | None:
+    """Return the first existing ``usage-monitor-settings.json`` of the search order, or None."""
     if getattr(sys, 'frozen', False):
         app_dir = Path(sys.executable).parent
     else:
@@ -87,30 +89,37 @@ def _load_settings() -> dict:
 
     home_claude = Path.home() / '.claude'
 
-    search_paths = [app_dir / SETTINGS_FILENAME, home_claude / SETTINGS_FILENAME]
-
-    for path in search_paths:
+    for path in (app_dir / SETTINGS_FILENAME, home_claude / SETTINGS_FILENAME):
         if path.is_file():
-            try:
-                # utf-8-sig reads BOM-less UTF-8 identically and strips a BOM
-                # when present (written by e.g. PowerShell 5 or legacy Notepad).
-                text = path.read_text(encoding='utf-8-sig').strip()
-                if not text:
-                    return {}
-                data = json.loads(text)
-                if not isinstance(data, dict):
-                    raise ValueError(f'Expected a JSON object, got {type(data).__name__}')
-                return _validate(data, path)
-            except (json.JSONDecodeError, ValueError) as exc:
-                show_warning_box(
-                    f'Invalid JSON in settings file:\n{path}\n\n{exc}',
-                    'Usage Monitor for Claude - Settings Error',
-                )
-                return {}
-            except OSError:
-                return {}
+            return path
 
-    return {}
+    return None
+
+
+def _load_settings() -> dict:
+    """Read the first ``usage-monitor-settings.json`` found, or return ``{}``."""
+    path = _find_settings_file()
+    if path is None:
+        return {}
+
+    try:
+        # utf-8-sig reads BOM-less UTF-8 identically and strips a BOM
+        # when present (written by e.g. PowerShell 5 or legacy Notepad).
+        text = path.read_text(encoding='utf-8-sig').strip()
+        if not text:
+            return {}
+        data = json.loads(text)
+        if not isinstance(data, dict):
+            raise ValueError(f'Expected a JSON object, got {type(data).__name__}')
+        return _validate(data, path)
+    except (json.JSONDecodeError, ValueError) as exc:
+        show_warning_box(
+            f'Invalid JSON in settings file:\n{path}\n\n{exc}',
+            'Usage Monitor for Claude - Settings Error',
+        )
+        return {}
+    except OSError:
+        return {}
 
 
 def _valid_rgba(value: object) -> bool:
@@ -314,6 +323,10 @@ def _icon_colors(key: str, defaults: dict[str, tuple]) -> dict[str, tuple]:
 
 _S = _load_settings()
 
+# The file _load_settings() read, or None when there is none.  The tray menu
+# writes account visibility back to this file.
+SETTINGS_PATH: Path | None = _find_settings_file()
+
 # Polling intervals (seconds)
 POLL_INTERVAL = _S.get('poll_interval', 180)
 POLL_FAST = _S.get('poll_fast', 120)
@@ -375,6 +388,9 @@ NOTIFY_CLAUDE_UPDATE: bool = _S.get('notify_claude_update', True)
 
 # Monitor the Codex CLI usage as an additional account when a signed-in Codex CLI is found
 MONITOR_CODEX: bool = _S.get('monitor_codex', True)
+
+# Account labels to leave out of monitoring (toggled from the tray menu)
+HIDDEN_ACCOUNTS: list[str] = _S.get('hidden_accounts', [])
 
 # Currency
 

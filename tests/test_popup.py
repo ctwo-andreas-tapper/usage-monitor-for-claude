@@ -1063,6 +1063,53 @@ class TestUpdateLoopResilience(unittest.TestCase):
         self.assertEqual(popup._window.evaluate_js.call_count, 2)
         self.assertEqual(popup._last_versions, ((1, 100.0),))
 
+    def _count_change_popup(self, last_versions, monitor_count):
+        popup = object.__new__(UsagePopup)
+        popup._running = True
+        popup._last_versions = last_versions
+        popup._window = MagicMock()
+
+        snap = MagicMock()
+        snap.version = 1
+
+        class FakeMonitor:
+            def __init__(self):
+                self.cache = MagicMock(snapshot=snap)
+                self._next_poll_time = 100.0
+
+        popup.app = MagicMock()
+        popup.app.monitors = [FakeMonitor() for _ in range(monitor_count)]
+        popup._window.evaluate_js.side_effect = lambda _script: setattr(popup, '_running', False)
+        return popup
+
+    def _run_update_loop(self, popup):
+        iterations = [0]
+
+        def guarded_sleep(_seconds):
+            iterations[0] += 1
+            if iterations[0] > 10:
+                popup._running = False
+
+        with patch('usage_monitor_for_claude.popup.time.sleep', side_effect=guarded_sleep),              patch('usage_monitor_for_claude.popup.find_installations', return_value=[]),              patch('usage_monitor_for_claude.popup._popup_data', return_value={}) as popup_data:
+            popup._update_loop()
+        return popup_data
+
+    def test_account_hidden_while_open_refreshes_the_popup(self):
+        """A shrinking monitor list is a change: the popup refreshes instead of failing on an index."""
+        popup = self._count_change_popup(((1, 100.0), (1, 100.0)), monitor_count=1)
+        popup_data = self._run_update_loop(popup)
+        popup._window.evaluate_js.assert_called_once()
+        self.assertEqual(len(popup_data.call_args.args[0]), 1)
+        self.assertEqual(popup._last_versions, ((1, 100.0),))
+
+    def test_account_shown_while_open_refreshes_the_popup(self):
+        """A growing monitor list is a change as well."""
+        popup = self._count_change_popup(((1, 100.0),), monitor_count=2)
+        popup_data = self._run_update_loop(popup)
+        popup._window.evaluate_js.assert_called_once()
+        self.assertEqual(len(popup_data.call_args.args[0]), 2)
+        self.assertEqual(popup._last_versions, ((1, 100.0), (1, 100.0)))
+
 
 # ---------------------------------------------------------------------------
 # _tray_position

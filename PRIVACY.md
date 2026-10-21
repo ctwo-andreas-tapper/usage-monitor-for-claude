@@ -37,14 +37,17 @@ login file or the keyring itself.
 
 ## Local Storage
 
-All usage data is kept in memory only and discarded when the application closes. An optional
-settings file (`usage-monitor-settings.json`) is read-only. The complete list of what the
+All usage data is kept in memory only and discarded when the application closes. The application
+reads an optional settings file (`usage-monitor-settings.json`). It writes that file only when you
+hide or show an account in the tray menu. Each click writes the file once, and only the
+`hidden_accounts` key changes. If the file does not exist, the application creates `~/.claude/usage-monitor-settings.json` at that point,
+on both platforms. It never overwrites a file that is not valid JSON. The complete list of what the
 application changes on your system follows - there is nothing else.
 
 When the application starts `codex app-server`, the Codex CLI writes its own state files in its home
 folder, as it does for any other start. The application does not write there.
 
-**On Windows** no files are written at all. Two values are written to the registry, both under
+**On Windows** no other files are written. Two values are written to the registry, both under
 `HKEY_CURRENT_USER`:
 
 - `Software\Classes\AppUserModelId\JensDuttke.UsageMonitorForClaude` - the display name and icon
