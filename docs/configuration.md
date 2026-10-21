@@ -161,7 +161,7 @@ The tray icon displays two small progress bars. By default, these show the sessi
 | `icon_fields` | `["five_hour", "seven_day"]` | Which two usage fields to show as icon bars. The first entry is the top bar (also determines the icon text), the second is the bottom bar |
 | `icon_style` | `"number+bars"` | Icon layout: `"number+bars"` shows the first field's percentage above two progress bars; `"numbers"` shows both fields as two stacked percentages without bars |
 
-Must be an array of exactly 2 non-empty strings. Unknown field names are accepted - if a field is `null` or missing from the API response, the bar shows 0%.
+Must be an array of exactly 2 non-empty strings. Unknown field names are accepted. If an account does not report a field (it is `null` or missing, for example on a plan without a 5-hour window), the next field moves up into its place. The account's other quotas fill the free slot, shortest window first, and a slot that nothing can fill stays empty.
 
 **Known field names:** `five_hour`, `seven_day`, `seven_day_sonnet`, `seven_day_opus`, `seven_day_cowork`, `seven_day_oauth_apps`
 

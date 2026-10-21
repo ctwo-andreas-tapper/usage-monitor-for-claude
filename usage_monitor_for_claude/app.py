@@ -31,7 +31,9 @@ from .settings import (
     NOTIFY_CLAUDE_UPDATE, ON_RESET_COMMAND, ON_STARTUP_COMMAND, ON_THRESHOLD_COMMAND, POLL_ERROR, POLL_FAST,
     POLL_FAST_EXTRA, POLL_INTERVAL, POLL_STAGGER, QUICK_ACTION_COMMAND, get_alert_thresholds,
 )
-from .formatting import elapsed_pct, field_period, format_credits, format_tooltip, is_active_quota, parse_field_name, popup_label
+from .formatting import (
+    elapsed_pct, expand_popup_fields, field_period, format_credits, format_tooltip, is_active_quota, parse_field_name, popup_label,
+)
 from .i18n import T
 from .popup import UsagePopup
 from .tray_icon import create_icon_image, create_status_image
@@ -46,6 +48,45 @@ RESET_BUFFER = 5
 def _future_iso(**kwargs: float) -> str:
     """Return an ISO 8601 timestamp offset from now by the given timedelta kwargs."""
     return (datetime.now(timezone.utc) + timedelta(**kwargs)).isoformat()
+
+
+def _icon_slots(data: dict[str, Any]) -> list[tuple[str | None, str]]:
+    """Return the ``(field, mode)`` shown in the tray icon's top and bottom slot.
+
+    The configured ``icon_fields`` win.  A configured field the account does
+    not report (a plan without a 5-hour window, for example) gives up its
+    slot: the configured fields that are reported move up in their order,
+    and the account's other active quota fields fill what is left, shortest
+    window first.  A slot nothing can fill is ``(None, 'utilization')``.
+
+    Parameters
+    ----------
+    data : dict
+        A successful usage response.
+    """
+    configured = [tuple(field.split(':', 1)) if ':' in field else (field, 'utilization') for field in ICON_FIELDS[:2]]
+    reported = [(field, mode) for field, mode in configured if _reports_utilization(data.get(field))]
+    if len(reported) == len(configured):
+        return configured
+
+    slots: list[tuple[str | None, str]] = list(reported)
+    shown = {field for field, _ in reported}
+    for field in expand_popup_fields(['*'], data):
+        if len(slots) == len(configured):
+            break
+        if field not in shown:
+            slots.append((field, 'utilization'))
+            shown.add(field)
+
+    while len(slots) < len(configured):
+        slots.append((None, 'utilization'))
+
+    return slots
+
+
+def _reports_utilization(entry: Any) -> bool:
+    """Return True if *entry* is a quota block with a utilization value."""
+    return isinstance(entry, dict) and entry.get('utilization') is not None
 
 
 def _align_to_reset(interval: int, next_reset: float | None) -> tuple[int, bool]:
@@ -198,20 +239,19 @@ class AccountMonitor:
         if 'error' in data:
             self.icon.icon = create_status_image('C!' if data.get('auth_error') else '!', self.shell._light_taskbar)
         else:
-            top_field, top_mode = ICON_FIELDS[0].split(':', 1) if ':' in ICON_FIELDS[0] else (ICON_FIELDS[0], 'utilization')
-            bottom_field, bottom_mode = ICON_FIELDS[1].split(':', 1) if ':' in ICON_FIELDS[1] else (ICON_FIELDS[1], 'utilization')
+            (top_field, top_mode), (bottom_field, bottom_mode) = _icon_slots(data)
             # isinstance instead of truthiness: a configured field may point at
             # a non-dict response value (e.g. the raw limits array).
-            top_entry = data.get(top_field)
-            bottom_entry = data.get(bottom_field)
+            top_entry = data.get(top_field) if top_field else None
+            bottom_entry = data.get(bottom_field) if bottom_field else None
             if not isinstance(top_entry, dict):
                 top_entry = {}
             if not isinstance(bottom_entry, dict):
                 bottom_entry = {}
             pct_top = top_entry.get('utilization', 0) or 0
             pct_bottom = bottom_entry.get('utilization', 0) or 0
-            top_period = field_period(top_field)
-            bottom_period = field_period(bottom_field)
+            top_period = field_period(top_field) if top_field else None
+            bottom_period = field_period(bottom_field) if bottom_field else None
             time_pct_top = elapsed_pct(top_entry.get('resets_at', ''), top_period) if top_period else None
             time_pct_bottom = elapsed_pct(bottom_entry.get('resets_at', ''), bottom_period) if bottom_period else None
             extra = data.get('extra_usage') or {}
